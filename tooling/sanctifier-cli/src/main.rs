@@ -1,3 +1,4 @@
+mod llm;
 use clap::{Parser, Subcommand};
 use colored::*;
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,9 @@ pub enum Commands {
         format: String,
         #[arg(short, long, default_value_t = 64000)]
         limit: usize,
+        /// Enable LLM-assisted explanations for findings
+        #[arg(long, default_value_t = false)]
+        llm_explain: bool,
     },
     /// Generate a summary report
     Report {
@@ -60,6 +64,7 @@ fn main() {
             path,
             format,
             limit,
+            llm_explain,
         } => {
             let is_json = format == "json";
 
@@ -89,6 +94,7 @@ fn main() {
             config.ledger_limit = *limit;
 
             let analyzer = Analyzer::new(config.clone());
+            // Pass llm_explain to AnalyzeArgs if using exec()
 
             let mut all_size_warnings: Vec<SizeWarning> = Vec::new();
             let mut all_unsafe_patterns: Vec<UnsafePattern> = Vec::new();
