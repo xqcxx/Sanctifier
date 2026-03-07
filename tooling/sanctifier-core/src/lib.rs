@@ -11,6 +11,8 @@ use syn::{parse_str, Fields, File, Item, Meta, Type};
 use soroban_sdk::Env;
 use thiserror::Error;
 
+
+
 const DEFAULT_APPROACHING_THRESHOLD: f64 = 0.8;
 
 fn with_panic_guard<F, R>(f: F) -> R
@@ -268,6 +270,7 @@ fn classify_size(
         None
     }
 }
+
 // ── Analyzer ──────────────────────────────────────────────────────────────────
 
 pub struct Analyzer {

@@ -7,6 +7,7 @@ import { exportToPdf } from "../lib/export-pdf";
 import { SeverityFilter } from "../components/SeverityFilter";
 import { FindingsList } from "../components/FindingsList";
 import { SummaryChart } from "../components/SummaryChart";
+import { KaniMetricsWidget } from "../components/KaniMetricsWidget";
 import { ThemeToggle } from "../components/ThemeToggle";
 import Link from "next/link";
 
@@ -23,15 +24,18 @@ export default function DashboardPage() {
   const [severityFilter, setSeverityFilter] = useState<Severity | "all">("all");
   const [error, setError] = useState<string | null>(null);
   const [jsonInput, setJsonInput] = useState("");
+  const [reportData, setReportData] = useState<AnalysisReport | null>(null);
 
   const loadReport = useCallback(() => {
     setError(null);
     try {
       const parsed = JSON.parse(jsonInput || SAMPLE_JSON) as AnalysisReport;
       setFindings(transformReport(parsed));
+      setReportData(parsed);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Invalid JSON");
       setFindings([]);
+      setReportData(null);
     }
   }, [jsonInput]);
 
@@ -46,8 +50,10 @@ export default function DashboardPage() {
       try {
         const parsed = JSON.parse(text) as AnalysisReport;
         setFindings(transformReport(parsed));
+        setReportData(parsed);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Invalid JSON");
+        setReportData(null);
       }
     };
     reader.readAsText(file);
@@ -109,11 +115,19 @@ export default function DashboardPage() {
           />
         </section>
 
-        {findings.length > 0 && (
+        {(findings.length > 0 || reportData?.kani_metrics) && (
           <>
-            <section>
-              <SummaryChart findings={findings} />
-            </section>
+            {reportData?.kani_metrics && (
+              <section>
+                <KaniMetricsWidget metrics={reportData.kani_metrics} />
+              </section>
+            )}
+
+            {findings.length > 0 && (
+              <section>
+                <SummaryChart findings={findings} />
+              </section>
+            )}
 
             <section>
               <h2 className="text-lg font-semibold mb-4">Filter by Severity</h2>
@@ -127,7 +141,7 @@ export default function DashboardPage() {
           </>
         )}
 
-        {findings.length === 0 && !error && (
+        {findings.length === 0 && !reportData?.kani_metrics && !error && (
           <p className="text-center text-zinc-500 dark:text-zinc-400 py-12">
             Load a report to view findings.
           </p>

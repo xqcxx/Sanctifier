@@ -32,6 +32,13 @@ export interface CustomRuleMatch {
   snippet: string;
 }
 
+export interface KaniVerificationMetrics {
+  total_assertions: number;
+  proven: number;
+  failed: number;
+  unreachable: number;
+}
+
 export interface AnalysisReport {
   size_warnings?: SizeWarning[];
   unsafe_patterns?: UnsafePattern[];
@@ -39,6 +46,7 @@ export interface AnalysisReport {
   panic_issues?: PanicIssue[];
   arithmetic_issues?: ArithmeticIssue[];
   custom_rule_matches?: CustomRuleMatch[];
+  kani_metrics?: KaniVerificationMetrics;
 }
 
 export interface Finding {
