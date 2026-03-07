@@ -6,6 +6,7 @@ use sanctifier_core::{
     Analyzer, ArithmeticIssue, CustomRuleMatch, SanctifyConfig, SizeWarning, UnsafePattern,
     UpgradeReport,
 };
+use sanctifier_core::zk_proof::ZkProofSummary;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -166,7 +167,7 @@ fn main() {
             }
 
             if format == "json" {
-                let output = serde_json::json!({
+                let mut output = serde_json::json!({
                     "size_warnings": all_size_warnings,
                     "unsafe_patterns": all_unsafe_patterns,
                     "auth_gaps": all_auth_gaps,
@@ -182,6 +183,14 @@ fn main() {
                         unreachable: 0,
                     }
                 });
+
+                // Generate ZK Proof Summary from the current output
+                let report_str = serde_json::to_string(&output).unwrap_or_default();
+                let zk_proof = ZkProofSummary::generate_zk_proof_summary(&report_str);
+                
+                // Inject the proof into the final JSON output
+                output["zk_proof_summary"] = serde_json::to_value(&zk_proof).unwrap();
+
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string())
@@ -191,7 +200,7 @@ fn main() {
                     println!("\nNo ledger size issues found.");
                 } else {
                     println!("\n{} Found Ledger Size Warnings!", "⚠️".yellow());
-                    for warning in all_size_warnings {
+                    for warning in &all_size_warnings {
                         let (icon, msg) = match warning.level {
                             sanctifier_core::SizeWarningLevel::ExceedsLimit => {
                                 ("🛑".red(), "EXCEEDS".red().bold())
@@ -216,7 +225,7 @@ fn main() {
 
                 if !all_auth_gaps.is_empty() {
                     println!("\n{} Found potential Authentication Gaps!", "🛑".red());
-                    for gap in all_auth_gaps {
+                    for gap in &all_auth_gaps {
                         println!(
                             "   {} Function {} is modifying state without require_auth()",
                             "->".red(),
@@ -229,7 +238,7 @@ fn main() {
 
                 if !all_panic_issues.is_empty() {
                     println!("\n{} Found explicit Panics/Unwraps!", "🛑".red());
-                    for issue in all_panic_issues {
+                    for issue in &all_panic_issues {
                         println!(
                             "   {} Function {}: Using {} (Location: {})",
                             "->".red(),
@@ -245,7 +254,7 @@ fn main() {
 
                 if !all_arithmetic_issues.is_empty() {
                     println!("\n{} Found unchecked Arithmetic Operations!", "🔢".yellow());
-                    for issue in all_arithmetic_issues {
+                    for issue in &all_arithmetic_issues {
                         println!(
                             "   {} Function {}: Unchecked `{}` ({})",
                             "->".red(),
@@ -261,7 +270,7 @@ fn main() {
 
                 if !all_custom_rule_matches.is_empty() {
                     println!("\n{} Found Custom Rule Matches!", "📜".yellow());
-                    for m in all_custom_rule_matches {
+                    for m in &all_custom_rule_matches {
                         println!(
                             "   {} Rule {}: `{}` (Line: {})",
                             "->".yellow(),
@@ -299,7 +308,7 @@ fn main() {
                 if !all_gas_estimations.is_empty() {
                     println!("\n{} Gas Estimation (Heuristics)", "⛽".cyan());
                     println!("   Note: These are static estimations based on instruction counting and do not represent exact Soroban simulations.");
-                    for gas in all_gas_estimations {
+                    for gas in &all_gas_estimations {
                         println!(
                             "   {} Function {}: {} Instructions, {} Mem bytes",
                             "->".cyan(),
@@ -309,6 +318,34 @@ fn main() {
                         );
                     }
                 }
+
+                // Append the ZK Proof generation explicitly in text mode as well
+                println!("\n{} Zero-Knowledge Proof Summary (Emulated)", "🛡️".blue());
+                
+                let output_data_for_hash = serde_json::json!({
+                    "size": all_size_warnings.len(),
+                    "auth": all_auth_gaps.len(),
+                    "panics": all_panic_issues.len(),
+                    "arith": all_arithmetic_issues.len(),
+                });
+                let report_str = serde_json::to_string(&output_data_for_hash).unwrap_or_default();
+                let zk_proof = ZkProofSummary::generate_zk_proof_summary(&report_str);
+                
+                println!(
+                    "   {} ID: {}",
+                    "->".blue(),
+                    zk_proof.proof_id.bold()
+                );
+                println!(
+                    "   {} Public Inputs Hash: {}",
+                    "->".blue(),
+                    zk_proof.public_inputs_hash
+                );
+                println!(
+                    "   {} Verifier Contract: {}",
+                    "->".blue(),
+                    zk_proof.verifier_contract.bold()
+                );
             }
         }
         Commands::Report { output } => {

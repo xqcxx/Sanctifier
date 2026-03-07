@@ -456,7 +456,8 @@ dependencies = [
 [[package]]
 name = "derive_arbitrary"
 version = "1.4.2"
-source = "git+https://github.com/rust-fuzz/arbitrary?branch=main#dbcdce423b4e0e0145f994d33ac7360a6e7ff93e"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1224,6 +1225,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "soroban-sdk",
  "syn",
  "thiserror",
@@ -2066,8 +2068,3 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
-
-[[patch.unused]]
-name = "arbitrary"
-version = "1.4.2"
-source = "git+https://github.com/rust-fuzz/arbitrary?branch=main#dbcdce423b4e0e0145f994d33ac7360a6e7ff93e"

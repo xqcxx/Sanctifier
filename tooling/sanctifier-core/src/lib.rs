@@ -1,5 +1,6 @@
 pub mod gas_estimator;
 pub mod kani_bridge;
+pub mod zk_proof;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
