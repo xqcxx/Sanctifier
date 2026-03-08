@@ -1,17 +1,17 @@
 use clap::{Parser, Subcommand};
 use colored::*;
-use serde::{Deserialize, Serialize};
 use sanctifier_core::gas_estimator::GasEstimationReport;
-use sanctifier_core::{
-    Analyzer, ArithmeticIssue, CustomRuleMatch, DeprecatedApiIssue, SanctifyConfig, SizeWarning, UnsafePattern,
-    UpgradeReport,
-};
 use sanctifier_core::zk_proof::ZkProofSummary;
+use sanctifier_core::{
+    Analyzer, ArithmeticIssue, CustomRuleMatch, DeprecatedApiIssue, SanctifyConfig, SizeWarning,
+    UnsafePattern, UpgradeReport,
+};
+use serde::{Deserialize, Serialize};
 
-use std::fs;
-use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct CachedAnalysis {
@@ -54,7 +54,6 @@ fn compute_hash(content: &str) -> String {
     hasher.update(content.as_bytes());
     format!("{:x}", hasher.finalize())
 }
-
 
 #[derive(Serialize)]
 pub struct KaniVerificationMetrics {
@@ -207,7 +206,11 @@ fn main() {
                 }
             }
 
-            cache.save(if path.is_dir() { path } else { path.parent().unwrap_or(Path::new(".")) });
+            cache.save(if path.is_dir() {
+                path
+            } else {
+                path.parent().unwrap_or(Path::new("."))
+            });
 
             if is_json {
                 eprintln!("{} Static analysis complete.", "✅".green());
@@ -238,7 +241,7 @@ fn main() {
                 // Generate ZK Proof Summary from the current output
                 let report_str = serde_json::to_string(&output).unwrap_or_default();
                 let zk_proof = ZkProofSummary::generate_zk_proof_summary(&report_str);
-                
+
                 // Inject the proof into the final JSON output
                 output["zk_proof_summary"] = serde_json::to_value(&zk_proof).unwrap();
 
@@ -320,7 +323,10 @@ fn main() {
                 }
 
                 if !all_deprecated_api_issues.is_empty() {
-                    println!("\n{} Found usages of Deprecated Soroban APIs!", "⚠️".yellow());
+                    println!(
+                        "\n{} Found usages of Deprecated Soroban APIs!",
+                        "⚠️".yellow()
+                    );
                     for issue in &all_deprecated_api_issues {
                         println!(
                             "   {} Function {}: Uses deprecated `{}` ({})",
@@ -385,7 +391,7 @@ fn main() {
 
                 // Append the ZK Proof generation explicitly in text mode as well
                 println!("\n{} Zero-Knowledge Proof Summary (Emulated)", "🛡️".blue());
-                
+
                 let output_data_for_hash = serde_json::json!({
                     "size": all_size_warnings.len(),
                     "auth": all_auth_gaps.len(),
@@ -395,12 +401,8 @@ fn main() {
                 });
                 let report_str = serde_json::to_string(&output_data_for_hash).unwrap_or_default();
                 let zk_proof = ZkProofSummary::generate_zk_proof_summary(&report_str);
-                
-                println!(
-                    "   {} ID: {}",
-                    "->".blue(),
-                    zk_proof.proof_id.bold()
-                );
+
+                println!("   {} ID: {}", "->".blue(), zk_proof.proof_id.bold());
                 println!(
                     "   {} Public Inputs Hash: {}",
                     "->".blue(),
@@ -461,7 +463,7 @@ fn main() {
 }
 
 fn is_soroban_project(path: &Path) -> bool {
-    if path.is_file() && path.extension().map_or(false, |e| e == "rs") {
+    if path.is_file() && path.extension().is_some_and(|e| e == "rs") {
         return true;
     }
 
@@ -485,6 +487,7 @@ fn is_soroban_project(path: &Path) -> bool {
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analyze_directory(
     dir: &Path,
     analyzer: &Analyzer,
@@ -498,16 +501,20 @@ fn analyze_directory(
     all_deprecated_api_issues: &mut Vec<DeprecatedApiIssue>,
     all_custom_rule_matches: &mut Vec<CustomRuleMatch>,
     all_gas_estimations: &mut Vec<GasEstimationReport>,
-    all_symbolic_paths: &mut Vec<sanctifier_core::symbolic::SymbolicGraph>,
-    upgrade_report: &mut UpgradeReport,
+    _all_symbolic_paths: &mut Vec<sanctifier_core::symbolic::SymbolicGraph>,
+    _upgrade_report: &mut UpgradeReport,
 ) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            
+
             // Skip paths matches in config.exclude
-            if config.exclude.iter().any(|p| name.contains(p) || path.to_string_lossy().contains(p)) {
+            if config
+                .exclude
+                .iter()
+                .any(|p| name.contains(p) || path.to_string_lossy().contains(p))
+            {
                 continue;
             }
 
@@ -517,7 +524,7 @@ fn analyze_directory(
                 }
                 analyze_directory(
                     &path,
-                    &analyzer,
+                    analyzer,
                     config,
                     cache,
                     all_size_warnings,
@@ -528,8 +535,8 @@ fn analyze_directory(
                     all_deprecated_api_issues,
                     all_custom_rule_matches,
                     all_gas_estimations,
-                    all_symbolic_paths,
-                    upgrade_report,
+                    _all_symbolic_paths,
+                    _upgrade_report,
                 );
             } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
                 if let Ok(content) = fs::read_to_string(&path) {
@@ -572,7 +579,12 @@ fn analyze_directory(
     }
 }
 
-fn run_analysis(path: &Path, content: &str, analyzer: &Analyzer, config: &SanctifyConfig) -> CachedAnalysis {
+fn run_analysis(
+    path: &Path,
+    content: &str,
+    analyzer: &Analyzer,
+    config: &SanctifyConfig,
+) -> CachedAnalysis {
     let mut analysis = CachedAnalysis::default();
 
     let warnings = analyzer.analyze_ledger_size(content);
@@ -589,7 +601,9 @@ fn run_analysis(path: &Path, content: &str, analyzer: &Analyzer, config: &Sancti
 
     let gaps = analyzer.scan_auth_gaps(content);
     for g in gaps {
-        analysis.auth_gaps.push(format!("{}: {}", path.display(), g));
+        analysis
+            .auth_gaps
+            .push(format!("{}: {}", path.display(), g));
     }
 
     let panics = analyzer.scan_panics(content);
@@ -623,29 +637,7 @@ fn run_analysis(path: &Path, content: &str, analyzer: &Analyzer, config: &Sancti
     analysis
 }
 
-fn collect_rs_files(path: &std::path::PathBuf) -> Vec<std::path::PathBuf> {
-    let mut files = Vec::new();
-    if path.is_file() && path.extension().map_or(false, |e| e == "rs") {
-        files.push(path.clone());
-    } else if path.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                let name = p
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                if p.is_dir() && name != "target" && name != ".git" {
-                    files.extend(collect_rs_files(&p));
-                } else if p.extension().map_or(false, |e| e == "rs") {
-                    files.push(p);
-                }
-            }
-        }
-    }
-    files
-}
+
 
 fn load_config(path: &Path) -> SanctifyConfig {
     if let Some(p) = find_config_path(path) {

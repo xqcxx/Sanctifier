@@ -5,6 +5,9 @@ edition = "2021"
 description = "Core analysis logic for Sanctifier"
 license = "MIT"
 
+[lints]
+workspace = true
+
 [dependencies]
 soroban-sdk = "20.0.0" # Target latest Soroban SDK
 

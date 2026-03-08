@@ -1,7 +1,7 @@
 #![no_std]
 
 /// Unified invariant guard that bridges runtime safety and formal verification.
-/// 
+///
 /// - In standard runtime/tests: expands to `assert!`.
 /// - In Kani formal verification: expands to `kani::assert!`.
 /// - In Sanctifier static analysis: flagged as a logical constraint.
@@ -20,8 +20,11 @@ macro_rules! guard_invariant {
             {
                 // Emit event to Host so indexers can track the exact violation
                 $env.events().publish(
-                    (soroban_sdk::symbol_short!("sanctity"), soroban_sdk::symbol_short!("violation")),
-                    $msg
+                    (
+                        soroban_sdk::symbol_short!("sanctity"),
+                        soroban_sdk::symbol_short!("violation"),
+                    ),
+                    $msg,
                 );
             }
             panic!("Sanctity violation at {}:{}: {}", file!(), line!(), $msg);
@@ -35,7 +38,13 @@ macro_rules! guard_invariant {
         kani::assert!($cond, $msg);
 
         #[cfg(not(kani))]
-        assert!($cond, "Sanctity violation at {}:{}: {}", file!(), line!(), $msg);
+        assert!(
+            $cond,
+            "Sanctity violation at {}:{}: {}",
+            file!(),
+            line!(),
+            $msg
+        );
     };
 
     // -------------------------------------------------------------------------
@@ -45,6 +54,11 @@ macro_rules! guard_invariant {
         kani::assert!($cond, "Invariant guard failed");
 
         #[cfg(not(kani))]
-        assert!($cond, "Sanctity violation at {}:{}: Invariant guard failed", file!(), line!());
+        assert!(
+            $cond,
+            "Sanctity violation at {}:{}: Invariant guard failed",
+            file!(),
+            line!()
+        );
     };
 }

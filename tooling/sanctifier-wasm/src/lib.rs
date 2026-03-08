@@ -50,10 +50,7 @@ pub fn analyze(source: &str) -> JsValue {
 
 #[wasm_bindgen]
 pub fn analyze_with_config(config_json: &str, source: &str) -> JsValue {
-    let config: SanctifyConfig = match serde_json::from_str(config_json) {
-        Ok(c) => c,
-        Err(_) => SanctifyConfig::default(),
-    };
+    let config: SanctifyConfig = serde_json::from_str(config_json).unwrap_or_default();
     let analyzer = Analyzer::new(config);
 
     let size_warnings = analyzer.analyze_ledger_size(source);

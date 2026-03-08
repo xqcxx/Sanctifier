@@ -1,11 +1,11 @@
 pub mod gas_estimator;
 pub mod kani_bridge;
-pub mod zk_proof;
 pub mod symbolic;
+pub mod zk_proof;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::catch_unwind;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{parse_str, Fields, File, Item, Meta, Type};
@@ -14,8 +14,6 @@ use syn::{parse_str, Fields, File, Item, Meta, Type};
 use soroban_sdk::Env;
 use thiserror::Error;
 
-
-
 const DEFAULT_APPROACHING_THRESHOLD: f64 = 0.8;
 
 fn with_panic_guard<F, R>(f: F) -> R
@@ -23,10 +21,7 @@ where
     F: FnOnce() -> R + std::panic::UnwindSafe,
     R: Default,
 {
-    match catch_unwind(f) {
-        Ok(res) => res,
-        Err(_) => R::default(),
-    }
+    catch_unwind(f).unwrap_or_default()
 }
 
 // ── Existing types ────────────────────────────────────────────────────────────
@@ -114,6 +109,7 @@ impl UpgradeReport {
     }
 }
 
+#[allow(dead_code)]
 fn has_attr(attrs: &[syn::Attribute], name: &str) -> bool {
     attrs.iter().any(|attr| {
         if let Meta::Path(path) = &attr.meta {
@@ -276,9 +272,7 @@ fn classify_size(
     strict: bool,
     strict_threshold: usize,
 ) -> Option<SizeWarningLevel> {
-    if size >= limit {
-        Some(SizeWarningLevel::ExceedsLimit)
-    } else if strict && size >= strict_threshold {
+    if size >= limit || (strict && size >= strict_threshold) {
         Some(SizeWarningLevel::ExceedsLimit)
     } else if size as f64 >= limit as f64 * approaching {
         Some(SizeWarningLevel::ApproachingLimit)
@@ -325,7 +319,7 @@ impl Analyzer {
                 }
             }
         }
-        
+
         graphs
     }
 
@@ -357,12 +351,12 @@ impl Analyzer {
                             let fn_name = f.sig.ident.to_string();
                             let mut has_mutation = false;
                             let mut has_auth = false;
-                            
+
                             self.check_fn_auth_and_mutation(
-                                &f.block, 
-                                &auth_fns, 
-                                &mut has_mutation, 
-                                &mut has_auth
+                                &f.block,
+                                &auth_fns,
+                                &mut has_mutation,
+                                &mut has_auth,
                             );
 
                             if has_mutation && !has_auth {
@@ -404,7 +398,12 @@ impl Analyzer {
         issues
     }
 
-    fn check_fn_deprecated_apis(&self, block: &syn::Block, fn_name: &str, issues: &mut Vec<DeprecatedApiIssue>) {
+    fn check_fn_deprecated_apis(
+        &self,
+        block: &syn::Block,
+        fn_name: &str,
+        issues: &mut Vec<DeprecatedApiIssue>,
+    ) {
         for stmt in &block.stmts {
             match stmt {
                 syn::Stmt::Expr(expr, _) => self.check_expr_deprecated_apis(expr, fn_name, issues),
@@ -418,13 +417,22 @@ impl Analyzer {
         }
     }
 
-    fn check_expr_deprecated_apis(&self, expr: &syn::Expr, fn_name: &str, issues: &mut Vec<DeprecatedApiIssue>) {
+    fn check_expr_deprecated_apis(
+        &self,
+        expr: &syn::Expr,
+        fn_name: &str,
+        issues: &mut Vec<DeprecatedApiIssue>,
+    ) {
         match expr {
             syn::Expr::MethodCall(m) => {
                 let method_name = m.method.to_string();
                 if matches!(
                     method_name.as_str(),
-                    "put_contract_data" | "get_contract_data" | "has_contract_data" | "remove_contract_data" | "get_contract_id"
+                    "put_contract_data"
+                        | "get_contract_data"
+                        | "has_contract_data"
+                        | "remove_contract_data"
+                        | "get_contract_id"
                 ) {
                     issues.push(DeprecatedApiIssue {
                         function_name: fn_name.to_string(),
@@ -614,53 +622,80 @@ impl Analyzer {
         }
     }
 
-    fn check_expr_inner_for_auth(&self, expr: &syn::Expr, known_auth_fns: &HashSet<String>) -> bool {
+    fn check_expr_inner_for_auth(
+        &self,
+        expr: &syn::Expr,
+        known_auth_fns: &HashSet<String>,
+    ) -> bool {
         match expr {
             syn::Expr::Call(c) => {
                 if let syn::Expr::Path(p) = &*c.func {
                     if let Some(segment) = p.path.segments.last() {
                         let ident = segment.ident.to_string();
-                        if ident == "require_auth" || ident == "require_auth_for_args" || known_auth_fns.contains(&ident) {
+                        if ident == "require_auth"
+                            || ident == "require_auth_for_args"
+                            || known_auth_fns.contains(&ident)
+                        {
                             return true;
                         }
                     }
                 }
-                c.args.iter().any(|arg| self.check_expr_inner_for_auth(arg, known_auth_fns))
+                c.args
+                    .iter()
+                    .any(|arg| self.check_expr_inner_for_auth(arg, known_auth_fns))
             }
             syn::Expr::MethodCall(m) => {
                 let method_name = m.method.to_string();
-                if method_name == "require_auth" || method_name == "require_auth_for_args" || known_auth_fns.contains(&method_name) {
+                if method_name == "require_auth"
+                    || method_name == "require_auth_for_args"
+                    || known_auth_fns.contains(&method_name)
+                {
                     return true;
                 }
                 if self.check_expr_inner_for_auth(&m.receiver, known_auth_fns) {
                     return true;
                 }
-                m.args.iter().any(|arg| self.check_expr_inner_for_auth(arg, known_auth_fns))
+                m.args
+                    .iter()
+                    .any(|arg| self.check_expr_inner_for_auth(arg, known_auth_fns))
             }
-            syn::Expr::Block(b) => b.block.stmts.iter().any(|s| self.check_expr_for_auth(s, known_auth_fns)),
+            syn::Expr::Block(b) => b
+                .block
+                .stmts
+                .iter()
+                .any(|s| self.check_expr_for_auth(s, known_auth_fns)),
             syn::Expr::If(i) => {
-                self.check_expr_inner_for_auth(&i.cond, known_auth_fns) ||
-                i.then_branch.stmts.iter().any(|s| self.check_expr_for_auth(s, known_auth_fns)) ||
-                i.else_branch.as_ref().map_or(false, |(_, e)| self.check_expr_inner_for_auth(e, known_auth_fns))
+                self.check_expr_inner_for_auth(&i.cond, known_auth_fns)
+                    || i.then_branch
+                        .stmts
+                        .iter()
+                        .any(|s| self.check_expr_for_auth(s, known_auth_fns))
+                    || i.else_branch.as_ref().is_some_and(|(_, e)| {
+                        self.check_expr_inner_for_auth(e, known_auth_fns)
+                    })
             }
             syn::Expr::Match(m) => {
-                self.check_expr_inner_for_auth(&m.expr, known_auth_fns) ||
-                m.arms.iter().any(|arm| self.check_expr_inner_for_auth(&arm.body, known_auth_fns))
+                self.check_expr_inner_for_auth(&m.expr, known_auth_fns)
+                    || m.arms
+                        .iter()
+                        .any(|arm| self.check_expr_inner_for_auth(&arm.body, known_auth_fns))
             }
             _ => false,
         }
     }
 
     fn check_fn_auth_and_mutation(
-        &self, 
-        block: &syn::Block, 
+        &self,
+        block: &syn::Block,
         auth_fns: &HashSet<String>,
-        has_mutation: &mut bool, 
-        has_auth: &mut bool
+        has_mutation: &mut bool,
+        has_auth: &mut bool,
     ) {
         for stmt in &block.stmts {
             match stmt {
-                syn::Stmt::Expr(expr, _) => self.check_expr_v2(expr, auth_fns, has_mutation, has_auth),
+                syn::Stmt::Expr(expr, _) => {
+                    self.check_expr_v2(expr, auth_fns, has_mutation, has_auth)
+                }
                 syn::Stmt::Local(local) => {
                     if let Some(init) = &local.init {
                         self.check_expr_v2(&init.expr, auth_fns, has_mutation, has_auth);
@@ -678,13 +713,22 @@ impl Analyzer {
         }
     }
 
-    fn check_expr_v2(&self, expr: &syn::Expr, auth_fns: &HashSet<String>, has_mutation: &mut bool, has_auth: &mut bool) {
+    fn check_expr_v2(
+        &self,
+        expr: &syn::Expr,
+        auth_fns: &HashSet<String>,
+        has_mutation: &mut bool,
+        has_auth: &mut bool,
+    ) {
         match expr {
             syn::Expr::Call(c) => {
                 if let syn::Expr::Path(p) = &*c.func {
                     if let Some(segment) = p.path.segments.last() {
                         let ident = segment.ident.to_string();
-                        if ident == "require_auth" || ident == "require_auth_for_args" || auth_fns.contains(&ident) {
+                        if ident == "require_auth"
+                            || ident == "require_auth_for_args"
+                            || auth_fns.contains(&ident)
+                        {
                             *has_auth = true;
                         }
                     }
@@ -705,7 +749,10 @@ impl Analyzer {
                         *has_mutation = true;
                     }
                 }
-                if method_name == "require_auth" || method_name == "require_auth_for_args" || auth_fns.contains(&method_name) {
+                if method_name == "require_auth"
+                    || method_name == "require_auth_for_args"
+                    || auth_fns.contains(&method_name)
+                {
                     *has_auth = true;
                 }
                 self.check_expr_v2(&m.receiver, auth_fns, has_mutation, has_auth);
@@ -713,7 +760,9 @@ impl Analyzer {
                     self.check_expr_v2(arg, auth_fns, has_mutation, has_auth);
                 }
             }
-            syn::Expr::Block(b) => self.check_fn_auth_and_mutation(&b.block, auth_fns, has_mutation, has_auth),
+            syn::Expr::Block(b) => {
+                self.check_fn_auth_and_mutation(&b.block, auth_fns, has_mutation, has_auth)
+            }
             syn::Expr::If(i) => {
                 self.check_expr_v2(&i.cond, auth_fns, has_mutation, has_auth);
                 self.check_fn_auth_and_mutation(&i.then_branch, auth_fns, has_mutation, has_auth);
@@ -747,9 +796,9 @@ impl Analyzer {
 
     fn analyze_ledger_size_impl(&self, source: &str) -> Vec<SizeWarning> {
         let limit = self.config.ledger_limit;
-        let approaching = (limit as f64 * DEFAULT_APPROACHING_THRESHOLD) as usize;
-        let strict = self.config.strict_mode;
-        let strict_threshold = limit / 2;
+        let _approaching = (limit as f64 * DEFAULT_APPROACHING_THRESHOLD) as usize;
+        let _strict = self.config.strict_mode;
+        let _strict_threshold = limit / 2;
 
         let file = match parse_str::<File>(source) {
             Ok(f) => f,
@@ -860,10 +909,11 @@ impl Analyzer {
 
     // ── Event Consistency and Optimization (NEW) ─────────────────────────────
 
-    /// Scans for `env.events().publish(topics, data)` and checks:
-    /// 1. Consistency of topic counts for the same event name.
-    /// 2. Opportunities to use `symbol_short!` for gas savings.
-    /* pub fn scan_events(&self, source: &str) -> Vec<EventIssue> {
+    // Scans for `env.events().publish(topics, data)` and checks:
+    // 1. Consistency of topic counts for the same event name.
+    // 2. Opportunities to use `symbol_short!` for gas savings.
+    /*
+    pub fn scan_events(&self, source: &str) -> Vec<EventIssue> {
         with_panic_guard(|| self.scan_events_impl(source))
     }
 
@@ -883,8 +933,8 @@ impl Analyzer {
     } */
     // ── Unsafe-pattern visitor ────────────────────────────────────────────────
 
-    /// Visitor-based scan for `panic!`, `.unwrap()`, `.expect()` with line
-    /// numbers derived from proc-macro2 span locations.
+    /// Visitor-based scan for `panic!`, `.unwrap()`, `.expect()` with line numbers
+    /// derived from proc-macro2 span locations.
     pub fn analyze_unsafe_patterns(&self, source: &str) -> Vec<UnsafePattern> {
         with_panic_guard(|| self.analyze_unsafe_patterns_impl(source))
     }
@@ -1255,8 +1305,10 @@ mod tests {
 
     #[test]
     fn test_analyze_with_limit() {
-        let mut config = SanctifyConfig::default();
-        config.ledger_limit = 50;
+        let config = SanctifyConfig {
+            ledger_limit: 50,
+            ..Default::default()
+        };
         let analyzer = Analyzer::new(config);
         let source = r#"
             #[contracttype]
@@ -1274,9 +1326,11 @@ mod tests {
     /*
         #[test]
         fn test_ledger_size_enum_and_approaching() {
-            let mut config = SanctifyConfig::default();
-            config.ledger_limit = 100;
-            config.approaching_threshold = 0.5;
+            let config = SanctifyConfig {
+                ledger_limit: 100,
+                approaching_threshold: 0.5,
+                ..Default::default()
+            };
             let analyzer = Analyzer::new(config);
             let source = r#"
                 #[contracttype]
