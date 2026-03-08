@@ -218,6 +218,8 @@ pub struct SanctifyConfig {
     pub strict_mode: bool,
     #[serde(default)]
     pub custom_rules: Vec<CustomRule>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 fn default_ignore_paths() -> Vec<String> {
@@ -251,6 +253,7 @@ impl Default for SanctifyConfig {
             approaching_threshold: default_approaching_threshold(),
             strict_mode: false,
             custom_rules: vec![],
+            exclude: vec![],
         }
     }
 }
