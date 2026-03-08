@@ -3,13 +3,57 @@ use colored::*;
 use sanctifier_core::gas_estimator::GasEstimationReport;
 use sanctifier_core::zk_proof::ZkProofSummary;
 use sanctifier_core::{
-    Analyzer, ArithmeticIssue, CustomRuleMatch, SanctifyConfig, SizeWarning, UnsafePattern,
+    Analyzer, ArithmeticIssue, CustomRuleMatch, DeprecatedApiIssue, SanctifyConfig, SizeWarning, UnsafePattern,
     UpgradeReport,
 };
 use serde::{Deserialize, Serialize};
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct CachedAnalysis {
+    pub hash: String,
+    pub size_warnings: Vec<SizeWarning>,
+    pub unsafe_patterns: Vec<UnsafePattern>,
+    pub auth_gaps: Vec<String>,
+    pub panic_issues: Vec<sanctifier_core::PanicIssue>,
+    pub arithmetic_issues: Vec<ArithmeticIssue>,
+    pub deprecated_api_issues: Vec<DeprecatedApiIssue>,
+    pub custom_rule_matches: Vec<CustomRuleMatch>,
+    pub gas_estimations: Vec<GasEstimationReport>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct AnalysisCache {
+    pub files: HashMap<String, CachedAnalysis>,
+}
+
+impl AnalysisCache {
+    fn load(path: &Path) -> Self {
+        let cache_path = path.join(".sanctifier_cache.json");
+        if let Ok(content) = fs::read_to_string(cache_path) {
+            serde_json::from_str(&content).unwrap_or_default()
+        } else {
+            Self::default()
+        }
+    }
+
+    fn save(&self, path: &Path) {
+        let cache_path = path.join(".sanctifier_cache.json");
+        if let Ok(content) = serde_json::to_string_pretty(self) {
+            let _ = fs::write(cache_path, content);
+        }
+    }
+}
+
+fn compute_hash(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 /// Metrics for Kani formal verification results
 #[derive(Serialize)]
@@ -101,6 +145,7 @@ fn main() {
             let mut config = load_config(path);
             config.ledger_limit = *limit;
 
+            let mut cache = AnalysisCache::load(path);
             let analyzer = Analyzer::new(config.clone());
 
             let mut all_size_warnings: Vec<SizeWarning> = Vec::new();
@@ -108,8 +153,10 @@ fn main() {
             let mut all_auth_gaps: Vec<String> = Vec::new();
             let mut all_panic_issues: Vec<sanctifier_core::PanicIssue> = Vec::new();
             let mut all_arithmetic_issues: Vec<ArithmeticIssue> = Vec::new();
+            let mut all_deprecated_api_issues: Vec<DeprecatedApiIssue> = Vec::new();
             let mut all_custom_rule_matches: Vec<CustomRuleMatch> = Vec::new();
             let mut all_gas_estimations: Vec<GasEstimationReport> = Vec::new();
+            let mut all_symbolic_paths: Vec<sanctifier_core::symbolic::SymbolicGraph> = Vec::new();
             let mut upgrade_report = UpgradeReport::empty();
 
             if path.is_dir() {
@@ -117,60 +164,62 @@ fn main() {
                     path,
                     &analyzer,
                     &config,
+                    &mut cache,
                     &mut all_size_warnings,
                     &mut all_unsafe_patterns,
                     &mut all_auth_gaps,
                     &mut all_panic_issues,
                     &mut all_arithmetic_issues,
+                    &mut all_deprecated_api_issues,
                     &mut all_custom_rule_matches,
                     &mut all_gas_estimations,
+                    &mut all_symbolic_paths,
                     &mut upgrade_report,
                 );
             } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
                 if let Ok(content) = fs::read_to_string(path) {
-                    all_size_warnings.extend(analyzer.analyze_ledger_size(&content));
+                    let file_hash = compute_hash(&content);
+                    let file_key = path.to_string_lossy().to_string();
 
-                    let patterns = analyzer.analyze_unsafe_patterns(&content);
-                    for mut p in patterns {
-                        p.snippet = format!("{}: {}", path.display(), p.snippet);
-                        all_unsafe_patterns.push(p);
-                    }
+                    let analysis = if let Some(cached) = cache.files.get(&file_key) {
+                        if cached.hash == file_hash {
+                            cached.clone()
+                        } else {
+                            let res = run_analysis(path, &content, &analyzer, &config);
+                            let updated = CachedAnalysis {
+                                hash: file_hash,
+                                ..res
+                            };
+                            cache.files.insert(file_key, updated.clone());
+                            updated
+                        }
+                    } else {
+                        let res = run_analysis(path, &content, &analyzer, &config);
+                        let updated = CachedAnalysis {
+                            hash: file_hash,
+                            ..res
+                        };
+                        cache.files.insert(file_key, updated.clone());
+                        updated
+                    };
 
-                    let gaps = analyzer.scan_auth_gaps(&content);
-                    for g in gaps {
-                        all_auth_gaps.push(format!("{}: {}", path.display(), g));
-                    }
-
-                    let panics = analyzer.scan_panics(&content);
-                    for p in panics {
-                        let mut p_mod = p.clone();
-                        p_mod.location = format!("{}: {}", path.display(), p.location);
-                        all_panic_issues.push(p_mod);
-                    }
-
-                    let arith = analyzer.scan_arithmetic_overflow(&content);
-                    for mut a in arith {
-                        a.location = format!("{}: {}", path.display(), a.location);
-                        all_arithmetic_issues.push(a);
-                    }
-
-                    /* let events = analyzer.scan_events(&content);
-                    for mut e in events {
-                        e.location = format!("{}: {}", path.display(), e.location);
-                        all_event_issues.push(e);
-                    } */
-
-                    let custom_matches =
-                        analyzer.analyze_custom_rules(&content, &config.custom_rules);
-                    for mut m in custom_matches {
-                        m.snippet = format!("{}: {}", path.display(), m.snippet);
-                        all_custom_rule_matches.push(m);
-                    }
-
+                    all_size_warnings.extend(analysis.size_warnings);
+                    all_unsafe_patterns.extend(analysis.unsafe_patterns);
+                    all_auth_gaps.extend(analysis.auth_gaps);
+                    all_panic_issues.extend(analysis.panic_issues);
+                    all_arithmetic_issues.extend(analysis.arithmetic_issues);
+                    all_deprecated_api_issues.extend(analysis.deprecated_api_issues);
+                    all_custom_rule_matches.extend(analysis.custom_rule_matches);
+                    all_gas_estimations.extend(analysis.gas_estimations);
                     let gas_reports = analyzer.scan_gas_estimation(&content);
                     all_gas_estimations.extend(gas_reports);
+
+                    let sym_paths = analyzer.analyze_symbolic_paths(&content);
+                    all_symbolic_paths.extend(sym_paths);
                 }
             }
+
+            cache.save(if path.is_dir() { path } else { path.parent().unwrap_or(Path::new(".")) });
 
             if is_json {
                 eprintln!("{} Static analysis complete.", "✅".green());
@@ -185,8 +234,10 @@ fn main() {
                     "auth_gaps": all_auth_gaps,
                     "panic_issues": all_panic_issues,
                     "arithmetic_issues": all_arithmetic_issues,
+                    "deprecated_api_issues": all_deprecated_api_issues,
                     "custom_rule_matches": all_custom_rule_matches,
                     "gas_estimations": all_gas_estimations,
+                    "symbolic_paths": all_symbolic_paths,
                     "upgrade_report": upgrade_report,
                     "kani_metrics": KaniVerificationMetrics {
                         total_assertions: 12,
@@ -280,6 +331,19 @@ fn main() {
                     println!("\nNo arithmetic overflow risks found.");
                 }
 
+                if !all_deprecated_api_issues.is_empty() {
+                    println!("\n{} Found usages of Deprecated Soroban APIs!", "⚠️".yellow());
+                    for issue in &all_deprecated_api_issues {
+                        println!(
+                            "   {} Function {}: Uses deprecated `{}` ({})",
+                            "->".red(),
+                            issue.function_name.bold(),
+                            issue.deprecated_api.yellow().bold(),
+                            issue.location
+                        );
+                    }
+                }
+
                 if !all_custom_rule_matches.is_empty() {
                     println!("\n{} Found Custom Rule Matches!", "📜".yellow());
                     for m in &all_custom_rule_matches {
@@ -339,6 +403,7 @@ fn main() {
                     "auth": all_auth_gaps.len(),
                     "panics": all_panic_issues.len(),
                     "arith": all_arithmetic_issues.len(),
+                    "deprecated": all_deprecated_api_issues.len(),
                 });
                 let report_str = serde_json::to_string(&output_data_for_hash).unwrap_or_default();
                 let zk_proof = ZkProofSummary::generate_zk_proof_summary(&report_str);
@@ -432,19 +497,28 @@ fn analyze_directory(
     dir: &Path,
     analyzer: &Analyzer,
     config: &SanctifyConfig,
+    cache: &mut AnalysisCache,
     all_size_warnings: &mut Vec<SizeWarning>,
     all_unsafe_patterns: &mut Vec<UnsafePattern>,
     all_auth_gaps: &mut Vec<String>,
     all_panic_issues: &mut Vec<sanctifier_core::PanicIssue>,
     all_arithmetic_issues: &mut Vec<ArithmeticIssue>,
+    all_deprecated_api_issues: &mut Vec<DeprecatedApiIssue>,
     all_custom_rule_matches: &mut Vec<CustomRuleMatch>,
     all_gas_estimations: &mut Vec<GasEstimationReport>,
+    all_symbolic_paths: &mut Vec<sanctifier_core::symbolic::SymbolicGraph>,
     upgrade_report: &mut UpgradeReport,
 ) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            
+            // Skip paths matches in config.exclude
+            if config.exclude.iter().any(|p| name.contains(p) || path.to_string_lossy().contains(p)) {
+                continue;
+            }
+
             if path.is_dir() {
                 if config.ignore_paths.iter().any(|p| name.contains(p)) {
                     continue;
@@ -453,66 +527,108 @@ fn analyze_directory(
                     &path,
                     &analyzer,
                     config,
+                    cache,
                     all_size_warnings,
                     all_unsafe_patterns,
                     all_auth_gaps,
                     all_panic_issues,
                     all_arithmetic_issues,
+                    all_deprecated_api_issues,
                     all_custom_rule_matches,
                     all_gas_estimations,
+                    all_symbolic_paths,
                     upgrade_report,
                 );
             } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
                 if let Ok(content) = fs::read_to_string(&path) {
-                    let warnings = analyzer.analyze_ledger_size(&content);
-                    for mut w in warnings {
-                        w.struct_name = format!("{}: {}", path.display(), w.struct_name);
-                        all_size_warnings.push(w);
-                    }
+                    let file_hash = compute_hash(&content);
+                    let file_key = path.to_string_lossy().to_string();
 
-                    let patterns = analyzer.analyze_unsafe_patterns(&content);
-                    for mut p in patterns {
-                        p.snippet = format!("{}: {}", path.display(), p.snippet);
-                        all_unsafe_patterns.push(p);
-                    }
+                    let analysis = if let Some(cached) = cache.files.get(&file_key) {
+                        if cached.hash == file_hash {
+                            cached.clone()
+                        } else {
+                            let res = run_analysis(&path, &content, analyzer, config);
+                            let updated = CachedAnalysis {
+                                hash: file_hash.clone(),
+                                ..res
+                            };
+                            cache.files.insert(file_key, updated.clone());
+                            updated
+                        }
+                    } else {
+                        let res = run_analysis(&path, &content, analyzer, config);
+                        let updated = CachedAnalysis {
+                            hash: file_hash.clone(),
+                            ..res
+                        };
+                        cache.files.insert(file_key, updated.clone());
+                        updated
+                    };
 
-                    let gaps = analyzer.scan_auth_gaps(&content);
-                    for g in gaps {
-                        all_auth_gaps.push(format!("{}: {}", path.display(), g));
-                    }
-
-                    let panics = analyzer.scan_panics(&content);
-                    for p in panics {
-                        let mut p_mod = p.clone();
-                        p_mod.location = format!("{}: {}", path.display(), p.location);
-                        all_panic_issues.push(p_mod);
-                    }
-
-                    let arith = analyzer.scan_arithmetic_overflow(&content);
-                    for mut a in arith {
-                        a.location = format!("{}: {}", path.display(), a.location);
-                        all_arithmetic_issues.push(a);
-                    }
-
-                    /* let events = analyzer.scan_events(&content);
-                    for mut e in events {
-                        e.location = format!("{}: {}", path.display(), e.location);
-                        all_event_issues.push(e);
-                    } */
-
-                    let custom_matches =
-                        analyzer.analyze_custom_rules(&content, &config.custom_rules);
-                    for mut m in custom_matches {
-                        m.snippet = format!("{}: {}", path.display(), m.snippet);
-                        all_custom_rule_matches.push(m);
-                    }
-
-                    let gas_reports = analyzer.scan_gas_estimation(&content);
-                    all_gas_estimations.extend(gas_reports);
+                    all_size_warnings.extend(analysis.size_warnings);
+                    all_unsafe_patterns.extend(analysis.unsafe_patterns);
+                    all_auth_gaps.extend(analysis.auth_gaps);
+                    all_panic_issues.extend(analysis.panic_issues);
+                    all_arithmetic_issues.extend(analysis.arithmetic_issues);
+                    all_deprecated_api_issues.extend(analysis.deprecated_api_issues);
+                    all_custom_rule_matches.extend(analysis.custom_rule_matches);
+                    all_gas_estimations.extend(analysis.gas_estimations);
                 }
             }
         }
     }
+}
+
+fn run_analysis(path: &Path, content: &str, analyzer: &Analyzer, config: &SanctifyConfig) -> CachedAnalysis {
+    let mut analysis = CachedAnalysis::default();
+
+    let warnings = analyzer.analyze_ledger_size(content);
+    for mut w in warnings {
+        w.struct_name = format!("{}: {}", path.display(), w.struct_name);
+        analysis.size_warnings.push(w);
+    }
+
+    let patterns = analyzer.analyze_unsafe_patterns(content);
+    for mut p in patterns {
+        p.snippet = format!("{}: {}", path.display(), p.snippet);
+        analysis.unsafe_patterns.push(p);
+    }
+
+    let gaps = analyzer.scan_auth_gaps(content);
+    for g in gaps {
+        analysis.auth_gaps.push(format!("{}: {}", path.display(), g));
+    }
+
+    let panics = analyzer.scan_panics(content);
+    for p in panics {
+        let mut p_mod = p.clone();
+        p_mod.location = format!("{}: {}", path.display(), p.location);
+        analysis.panic_issues.push(p_mod);
+    }
+
+    let arith = analyzer.scan_arithmetic_overflow(content);
+    for mut a in arith {
+        a.location = format!("{}: {}", path.display(), a.location);
+        analysis.arithmetic_issues.push(a);
+    }
+
+    let deprecated = analyzer.scan_deprecated_apis(content);
+    for mut d in deprecated {
+        d.location = format!("{}: {}", path.display(), d.location);
+        analysis.deprecated_api_issues.push(d);
+    }
+
+    let custom_matches = analyzer.analyze_custom_rules(content, &config.custom_rules);
+    for mut m in custom_matches {
+        m.snippet = format!("{}: {}", path.display(), m.snippet);
+        analysis.custom_rule_matches.push(m);
+    }
+
+    let gas_reports = analyzer.scan_gas_estimation(content);
+    analysis.gas_estimations.extend(gas_reports);
+
+    analysis
 }
 
 fn collect_rs_files(path: &std::path::PathBuf) -> Vec<std::path::PathBuf> {
@@ -540,17 +656,21 @@ fn collect_rs_files(path: &std::path::PathBuf) -> Vec<std::path::PathBuf> {
 }
 
 fn load_config(path: &Path) -> SanctifyConfig {
-    find_config_path(path)
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|content| toml::from_str::<SanctifyConfig>(&content).ok())
-        .unwrap_or_default()
+    if let Some(p) = find_config_path(path) {
+        if let Ok(content) = fs::read_to_string(&p) {
+            if let Ok(cfg) = toml::from_str::<SanctifyConfig>(&content) {
+                return cfg;
+            }
+        }
+    }
+    SanctifyConfig::default()
 }
 
 fn find_config_path(start_path: &Path) -> Option<PathBuf> {
-    let mut current = if start_path.is_dir() {
-        Some(start_path.to_path_buf())
+    let mut current = if let Ok(abs) = fs::canonicalize(start_path) {
+        Some(abs)
     } else {
-        start_path.parent().map(|p| p.to_path_buf())
+        Some(start_path.to_path_buf())
     };
 
     while let Some(path) = current {
@@ -558,11 +678,7 @@ fn find_config_path(start_path: &Path) -> Option<PathBuf> {
         if config_path.exists() {
             return Some(config_path);
         }
-        current = if path.parent().is_some() {
-            path.parent().map(|p| p.to_path_buf())
-        } else {
-            None
-        }
+        current = path.parent().map(|p| p.to_path_buf());
     }
     None
 }

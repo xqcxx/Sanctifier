@@ -1,6 +1,7 @@
 pub mod gas_estimator;
 pub mod kani_bridge;
 pub mod zk_proof;
+pub mod symbolic;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -9,6 +10,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{parse_str, Fields, File, Item, Meta, Type};
 
+#[cfg(not(target_arch = "wasm32"))]
 use soroban_sdk::Env;
 use thiserror::Error;
 
@@ -30,7 +32,7 @@ where
 // ── Existing types ────────────────────────────────────────────────────────────
 
 /// Severity of a ledger size warning.
-#[derive(Debug, Serialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum SizeWarningLevel {
     /// Size exceeds the ledger entry limit (e.g. 64KB).
     ExceedsLimit,
@@ -38,7 +40,7 @@ pub enum SizeWarningLevel {
     ApproachingLimit,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SizeWarning {
     pub struct_name: String,
     pub estimated_size: usize,
@@ -46,7 +48,7 @@ pub struct SizeWarning {
     pub level: SizeWarningLevel,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PanicIssue {
     pub function_name: String,
     pub issue_type: String, // "panic!", "unwrap", "expect"
@@ -55,14 +57,14 @@ pub struct PanicIssue {
 
 // ── UnsafePattern types (visitor-based panic/unwrap scanning) ─────────────────
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum PatternType {
     Panic,
     Unwrap,
     Expect,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UnsafePattern {
     pub pattern_type: PatternType,
     pub line: usize,
@@ -71,7 +73,7 @@ pub struct UnsafePattern {
 
 // ── Upgrade analysis types ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UpgradeFinding {
     pub category: UpgradeCategory,
     pub function_name: Option<String>,
@@ -80,7 +82,7 @@ pub struct UpgradeFinding {
     pub suggestion: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum UpgradeCategory {
     AdminControl,
@@ -91,7 +93,7 @@ pub enum UpgradeCategory {
 }
 
 /// Upgrade safety report.
-#[derive(Debug, Serialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct UpgradeReport {
     pub findings: Vec<UpgradeFinding>,
     pub upgrade_mechanisms: Vec<String>,
@@ -144,7 +146,7 @@ fn is_init_fn(name: &str) -> bool {
 // ── ArithmeticIssue (NEW) ─────────────────────────────────────────────────────
 
 /// Represents an unchecked arithmetic operation that could overflow or underflow.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ArithmeticIssue {
     /// Contract function in which the operation was found.
     pub function_name: String,
@@ -159,7 +161,7 @@ pub struct ArithmeticIssue {
 // ── EventIssue (NEW) ──────────────────────────────────────────────────────────
 
 /// Severity of a event consistency issue.
-#[derive(Debug, Serialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum EventIssueType {
     /// Topics count varies for the same event name.
     InconsistentSchema,
@@ -167,12 +169,22 @@ pub enum EventIssueType {
     OptimizableTopic,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EventIssue {
     pub function_name: String,
     pub event_name: String,
     pub issue_type: EventIssueType,
     pub message: String,
+    pub location: String,
+}
+
+// ── Deprecated API Issue (NEW) ──────────────────────────────────────────────────
+
+/// Represents usage of a deprecated Soroban host function.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeprecatedApiIssue {
+    pub function_name: String,
+    pub deprecated_api: String,
     pub location: String,
 }
 
@@ -186,7 +198,7 @@ pub struct CustomRule {
 }
 
 /// A match from a custom regex rule.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CustomRuleMatch {
     pub rule_name: String,
     pub line: usize,
@@ -207,6 +219,8 @@ pub struct SanctifyConfig {
     pub strict_mode: bool,
     #[serde(default)]
     pub custom_rules: Vec<CustomRule>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 fn default_ignore_paths() -> Vec<String> {
@@ -240,6 +254,7 @@ impl Default for SanctifyConfig {
             approaching_threshold: default_approaching_threshold(),
             strict_mode: false,
             custom_rules: vec![],
+            exclude: vec![],
         }
     }
 }
@@ -287,6 +302,33 @@ impl Analyzer {
         with_panic_guard(|| self.scan_auth_gaps_impl(source))
     }
 
+    pub fn analyze_symbolic_paths(&self, source: &str) -> Vec<symbolic::SymbolicGraph> {
+        with_panic_guard(|| self.analyze_symbolic_paths_impl(source))
+    }
+
+    fn analyze_symbolic_paths_impl(&self, source: &str) -> Vec<symbolic::SymbolicGraph> {
+        let file = match parse_str::<File>(source) {
+            Ok(f) => f,
+            Err(_) => return vec![],
+        };
+
+        let mut graphs = Vec::new();
+        for item in &file.items {
+            if let Item::Impl(i) = item {
+                for impl_item in &i.items {
+                    if let syn::ImplItem::Fn(f) = impl_item {
+                        if let syn::Visibility::Public(_) = f.vis {
+                            // Only generate graphs for public functions
+                            graphs.push(symbolic::SymbolicAnalyzer::analyze_function(f));
+                        }
+                    }
+                }
+            }
+        }
+        
+        graphs
+    }
+
     pub fn scan_gas_estimation(&self, source: &str) -> Vec<gas_estimator::GasEstimationReport> {
         with_panic_guard(|| self.scan_gas_estimation_impl(source))
     }
@@ -306,13 +348,23 @@ impl Analyzer {
 
         for item in &file.items {
             if let Item::Impl(i) = item {
+                // 1. Identify all functions in this impl that perform auth (directly or indirectly)
+                let auth_fns = self.identify_auth_functions(i);
+
                 for impl_item in &i.items {
                     if let syn::ImplItem::Fn(f) = impl_item {
                         if let syn::Visibility::Public(_) = f.vis {
                             let fn_name = f.sig.ident.to_string();
                             let mut has_mutation = false;
                             let mut has_auth = false;
-                            self.check_fn_body(&f.block, &mut has_mutation, &mut has_auth);
+                            
+                            self.check_fn_auth_and_mutation(
+                                &f.block, 
+                                &auth_fns, 
+                                &mut has_mutation, 
+                                &mut has_auth
+                            );
+
                             if has_mutation && !has_auth {
                                 gaps.push(fn_name);
                             }
@@ -322,6 +374,90 @@ impl Analyzer {
             }
         }
         gaps
+    }
+
+    // ── Deprecated API detection ──────────────────────────────────────────────
+
+    /// Returns all usages of deprecated Soroban host functions inside contract impl functions.
+    pub fn scan_deprecated_apis(&self, source: &str) -> Vec<DeprecatedApiIssue> {
+        with_panic_guard(|| self.scan_deprecated_apis_impl(source))
+    }
+
+    fn scan_deprecated_apis_impl(&self, source: &str) -> Vec<DeprecatedApiIssue> {
+        let file = match parse_str::<File>(source) {
+            Ok(f) => f,
+            Err(_) => return vec![],
+        };
+
+        let mut issues = Vec::new();
+        for item in &file.items {
+            if let Item::Impl(i) = item {
+                for impl_item in &i.items {
+                    if let syn::ImplItem::Fn(f) = impl_item {
+                        let fn_name = f.sig.ident.to_string();
+                        self.check_fn_deprecated_apis(&f.block, &fn_name, &mut issues);
+                    }
+                }
+            }
+        }
+
+        issues
+    }
+
+    fn check_fn_deprecated_apis(&self, block: &syn::Block, fn_name: &str, issues: &mut Vec<DeprecatedApiIssue>) {
+        for stmt in &block.stmts {
+            match stmt {
+                syn::Stmt::Expr(expr, _) => self.check_expr_deprecated_apis(expr, fn_name, issues),
+                syn::Stmt::Local(local) => {
+                    if let Some(init) = &local.init {
+                        self.check_expr_deprecated_apis(&init.expr, fn_name, issues);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn check_expr_deprecated_apis(&self, expr: &syn::Expr, fn_name: &str, issues: &mut Vec<DeprecatedApiIssue>) {
+        match expr {
+            syn::Expr::MethodCall(m) => {
+                let method_name = m.method.to_string();
+                if matches!(
+                    method_name.as_str(),
+                    "put_contract_data" | "get_contract_data" | "has_contract_data" | "remove_contract_data" | "get_contract_id"
+                ) {
+                    issues.push(DeprecatedApiIssue {
+                        function_name: fn_name.to_string(),
+                        deprecated_api: method_name.clone(),
+                        location: fn_name.to_string(),
+                    });
+                }
+                self.check_expr_deprecated_apis(&m.receiver, fn_name, issues);
+                for arg in &m.args {
+                    self.check_expr_deprecated_apis(arg, fn_name, issues);
+                }
+            }
+            syn::Expr::Call(c) => {
+                for arg in &c.args {
+                    self.check_expr_deprecated_apis(arg, fn_name, issues);
+                }
+            }
+            syn::Expr::Block(b) => self.check_fn_deprecated_apis(&b.block, fn_name, issues),
+            syn::Expr::If(i) => {
+                self.check_expr_deprecated_apis(&i.cond, fn_name, issues);
+                self.check_fn_deprecated_apis(&i.then_branch, fn_name, issues);
+                if let Some((_, else_expr)) = &i.else_branch {
+                    self.check_expr_deprecated_apis(else_expr, fn_name, issues);
+                }
+            }
+            syn::Expr::Match(m) => {
+                self.check_expr_deprecated_apis(&m.expr, fn_name, issues);
+                for arm in &m.arms {
+                    self.check_expr_deprecated_apis(&arm.body, fn_name, issues);
+                }
+            }
+            _ => {}
+        }
     }
 
     // ── Panic / unwrap / expect detection ────────────────────────────────────
@@ -426,15 +562,108 @@ impl Analyzer {
         }
     }
 
-    // ── Mutation / auth helpers ───────────────────────────────────────────────
+    /// Identifies all functions within an impl block that call require_auth,
+    /// either directly or by calling another function that does.
+    fn identify_auth_functions(&self, i: &syn::ItemImpl) -> HashSet<String> {
+        let mut auth_fns = HashSet::new();
+        let mut changed = true;
 
-    fn check_fn_body(&self, block: &syn::Block, has_mutation: &mut bool, has_auth: &mut bool) {
+        // Fixed-point iteration to handle nested calls
+        while changed {
+            changed = false;
+            for impl_item in &i.items {
+                if let syn::ImplItem::Fn(f) = impl_item {
+                    let fn_name = f.sig.ident.to_string();
+                    if auth_fns.contains(&fn_name) {
+                        continue;
+                    }
+
+                    if self.check_if_fn_calls_auth(&f.block, &auth_fns) {
+                        auth_fns.insert(fn_name);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        auth_fns
+    }
+
+    fn check_if_fn_calls_auth(&self, block: &syn::Block, known_auth_fns: &HashSet<String>) -> bool {
+        for stmt in &block.stmts {
+            if self.check_expr_for_auth(stmt, known_auth_fns) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn check_expr_for_auth(&self, stmt: &syn::Stmt, known_auth_fns: &HashSet<String>) -> bool {
+        match stmt {
+            syn::Stmt::Expr(expr, _) => self.check_expr_inner_for_auth(expr, known_auth_fns),
+            syn::Stmt::Local(local) => {
+                if let Some(init) = &local.init {
+                    self.check_expr_inner_for_auth(&init.expr, known_auth_fns)
+                } else {
+                    false
+                }
+            }
+            syn::Stmt::Macro(m) => {
+                m.mac.path.is_ident("require_auth") || m.mac.path.is_ident("require_auth_for_args")
+            }
+            _ => false,
+        }
+    }
+
+    fn check_expr_inner_for_auth(&self, expr: &syn::Expr, known_auth_fns: &HashSet<String>) -> bool {
+        match expr {
+            syn::Expr::Call(c) => {
+                if let syn::Expr::Path(p) = &*c.func {
+                    if let Some(segment) = p.path.segments.last() {
+                        let ident = segment.ident.to_string();
+                        if ident == "require_auth" || ident == "require_auth_for_args" || known_auth_fns.contains(&ident) {
+                            return true;
+                        }
+                    }
+                }
+                c.args.iter().any(|arg| self.check_expr_inner_for_auth(arg, known_auth_fns))
+            }
+            syn::Expr::MethodCall(m) => {
+                let method_name = m.method.to_string();
+                if method_name == "require_auth" || method_name == "require_auth_for_args" || known_auth_fns.contains(&method_name) {
+                    return true;
+                }
+                if self.check_expr_inner_for_auth(&m.receiver, known_auth_fns) {
+                    return true;
+                }
+                m.args.iter().any(|arg| self.check_expr_inner_for_auth(arg, known_auth_fns))
+            }
+            syn::Expr::Block(b) => b.block.stmts.iter().any(|s| self.check_expr_for_auth(s, known_auth_fns)),
+            syn::Expr::If(i) => {
+                self.check_expr_inner_for_auth(&i.cond, known_auth_fns) ||
+                i.then_branch.stmts.iter().any(|s| self.check_expr_for_auth(s, known_auth_fns)) ||
+                i.else_branch.as_ref().map_or(false, |(_, e)| self.check_expr_inner_for_auth(e, known_auth_fns))
+            }
+            syn::Expr::Match(m) => {
+                self.check_expr_inner_for_auth(&m.expr, known_auth_fns) ||
+                m.arms.iter().any(|arm| self.check_expr_inner_for_auth(&arm.body, known_auth_fns))
+            }
+            _ => false,
+        }
+    }
+
+    fn check_fn_auth_and_mutation(
+        &self, 
+        block: &syn::Block, 
+        auth_fns: &HashSet<String>,
+        has_mutation: &mut bool, 
+        has_auth: &mut bool
+    ) {
         for stmt in &block.stmts {
             match stmt {
-                syn::Stmt::Expr(expr, _) => self.check_expr(expr, has_mutation, has_auth),
+                syn::Stmt::Expr(expr, _) => self.check_expr_v2(expr, auth_fns, has_mutation, has_auth),
                 syn::Stmt::Local(local) => {
                     if let Some(init) = &local.init {
-                        self.check_expr(&init.expr, has_mutation, has_auth);
+                        self.check_expr_v2(&init.expr, auth_fns, has_mutation, has_auth);
                     }
                 }
                 syn::Stmt::Macro(m) => {
@@ -449,25 +678,24 @@ impl Analyzer {
         }
     }
 
-    fn check_expr(&self, expr: &syn::Expr, has_mutation: &mut bool, has_auth: &mut bool) {
+    fn check_expr_v2(&self, expr: &syn::Expr, auth_fns: &HashSet<String>, has_mutation: &mut bool, has_auth: &mut bool) {
         match expr {
             syn::Expr::Call(c) => {
                 if let syn::Expr::Path(p) = &*c.func {
                     if let Some(segment) = p.path.segments.last() {
                         let ident = segment.ident.to_string();
-                        if ident == "require_auth" || ident == "require_auth_for_args" {
+                        if ident == "require_auth" || ident == "require_auth_for_args" || auth_fns.contains(&ident) {
                             *has_auth = true;
                         }
                     }
                 }
                 for arg in &c.args {
-                    self.check_expr(arg, has_mutation, has_auth);
+                    self.check_expr_v2(arg, auth_fns, has_mutation, has_auth);
                 }
             }
             syn::Expr::MethodCall(m) => {
                 let method_name = m.method.to_string();
                 if method_name == "set" || method_name == "update" || method_name == "remove" {
-                    // Heuristic: check if receiver chain contains "storage"
                     let receiver_str = quote::quote!(#m.receiver).to_string();
                     if receiver_str.contains("storage")
                         || receiver_str.contains("persistent")
@@ -477,26 +705,26 @@ impl Analyzer {
                         *has_mutation = true;
                     }
                 }
-                if method_name == "require_auth" || method_name == "require_auth_for_args" {
+                if method_name == "require_auth" || method_name == "require_auth_for_args" || auth_fns.contains(&method_name) {
                     *has_auth = true;
                 }
-                self.check_expr(&m.receiver, has_mutation, has_auth);
+                self.check_expr_v2(&m.receiver, auth_fns, has_mutation, has_auth);
                 for arg in &m.args {
-                    self.check_expr(arg, has_mutation, has_auth);
+                    self.check_expr_v2(arg, auth_fns, has_mutation, has_auth);
                 }
             }
-            syn::Expr::Block(b) => self.check_fn_body(&b.block, has_mutation, has_auth),
+            syn::Expr::Block(b) => self.check_fn_auth_and_mutation(&b.block, auth_fns, has_mutation, has_auth),
             syn::Expr::If(i) => {
-                self.check_expr(&i.cond, has_mutation, has_auth);
-                self.check_fn_body(&i.then_branch, has_mutation, has_auth);
+                self.check_expr_v2(&i.cond, auth_fns, has_mutation, has_auth);
+                self.check_fn_auth_and_mutation(&i.then_branch, auth_fns, has_mutation, has_auth);
                 if let Some((_, else_expr)) = &i.else_branch {
-                    self.check_expr(else_expr, has_mutation, has_auth);
+                    self.check_expr_v2(else_expr, auth_fns, has_mutation, has_auth);
                 }
             }
             syn::Expr::Match(m) => {
-                self.check_expr(&m.expr, has_mutation, has_auth);
+                self.check_expr_v2(&m.expr, auth_fns, has_mutation, has_auth);
                 for arm in &m.arms {
-                    self.check_expr(&arm.body, has_mutation, has_auth);
+                    self.check_expr_v2(&arm.body, auth_fns, has_mutation, has_auth);
                 }
             }
             _ => {}
@@ -873,7 +1101,7 @@ impl<'ast> Visit<'ast> for UnsafeVisitor {
 }
 
 // ── SanctifiedGuard (runtime monitoring) ───────────────────────────────────────
-
+#[cfg(not(target_arch = "wasm32"))]
 /// Error type for SanctifiedGuard runtime invariant violations.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -881,6 +1109,7 @@ pub enum Error {
     InvariantViolation(String),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Trait for runtime monitoring. Implement this to enforce invariants
 /// on your contract state. The foundation for runtime monitoring.
 pub trait SanctifiedGuard {
@@ -1378,4 +1607,79 @@ mod tests {
             assert!(issues.iter().any(|i| i.issue_type == EventIssueType::OptimizableTopic && i.message.contains("\"event1\"")));
         }
     */
+    #[test]
+    fn test_scan_deprecated_apis() {
+        let analyzer = Analyzer::new(SanctifyConfig::default());
+        let source = r#"
+            #[contractimpl]
+            impl MyContract {
+                pub fn legacy_storage(env: Env) {
+                    env.put_contract_data(&Symbol::new(&env, "key"), &123);
+                    let val: i32 = env.get_contract_data(&Symbol::new(&env, "key")).unwrap();
+                    if env.has_contract_data(&Symbol::new(&env, "key")) {
+                        env.remove_contract_data(&Symbol::new(&env, "key"));
+                    }
+                    let id = env.get_contract_id();
+                }
+
+                pub fn modern_storage(env: Env) {
+                    env.storage().instance().set(&Symbol::new(&env, "key"), &123);
+                    let val: i32 = env.storage().instance().get(&Symbol::new(&env, "key")).unwrap();
+                }
+            }
+        "#;
+        let issues = analyzer.scan_deprecated_apis(source);
+        assert_eq!(issues.len(), 5);
+        let funcs: Vec<String> = issues.iter().map(|i| i.deprecated_api.clone()).collect();
+        assert!(funcs.contains(&"put_contract_data".to_string()));
+        assert!(funcs.contains(&"get_contract_data".to_string()));
+        assert!(funcs.contains(&"has_contract_data".to_string()));
+        assert!(funcs.contains(&"remove_contract_data".to_string()));
+        assert!(funcs.contains(&"get_contract_id".to_string()));
+
+        assert!(issues.iter().all(|i| i.function_name == "legacy_storage"));
+    }
+
+    #[test]
+    fn test_scan_auth_gaps_indirect() {
+        let analyzer = Analyzer::new(SanctifyConfig::default());
+        let source = r#"
+            #[contractimpl]
+            impl MyContract {
+                fn helper_auth(env: Env) {
+                    env.require_auth();
+                }
+
+                fn helper_no_auth(env: Env) {
+                    // No auth here
+                }
+
+                pub fn safe_indirect(env: Env, val: u32) {
+                    Self::helper_auth(env.clone());
+                    env.storage().instance().set(&DataKey::Val, &val);
+                }
+
+                pub fn unsafe_indirect(env: Env, val: u32) {
+                    Self::helper_no_auth(env.clone());
+                    env.storage().instance().set(&DataKey::Val, &val);
+                }
+
+                pub fn deep_safe(env: Env, val: u32) {
+                    Self::deep_helper(env.clone());
+                    env.storage().instance().set(&DataKey::Val, &val);
+                }
+
+                fn deep_helper(env: Env) {
+                    Self::helper_auth(env);
+                }
+            }
+        "#;
+        let gaps = analyzer.scan_auth_gaps(source);
+        // Only unsafe_indirect should be flagged.
+        // deep_safe and safe_indirect should be fine.
+        assert!(gaps.contains(&"unsafe_indirect".to_string()));
+        assert!(!gaps.contains(&"safe_indirect".to_string()));
+        assert!(!gaps.contains(&"deep_safe".to_string()));
+        assert_eq!(gaps.len(), 1);
+    }
 }
