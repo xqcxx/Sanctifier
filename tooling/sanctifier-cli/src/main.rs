@@ -3,15 +3,15 @@ use colored::*;
 use sanctifier_core::gas_estimator::GasEstimationReport;
 use sanctifier_core::zk_proof::ZkProofSummary;
 use sanctifier_core::{
-    Analyzer, ArithmeticIssue, CustomRuleMatch, DeprecatedApiIssue, SanctifyConfig, SizeWarning, UnsafePattern,
-    UpgradeReport,
+    Analyzer, ArithmeticIssue, CustomRuleMatch, DeprecatedApiIssue, SanctifyConfig, SizeWarning,
+    UnsafePattern, UpgradeReport,
 };
 use serde::{Deserialize, Serialize};
 
-use std::fs;
-use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct CachedAnalysis {
@@ -219,7 +219,11 @@ fn main() {
                 }
             }
 
-            cache.save(if path.is_dir() { path } else { path.parent().unwrap_or(Path::new(".")) });
+            cache.save(if path.is_dir() {
+                path
+            } else {
+                path.parent().unwrap_or(Path::new("."))
+            });
 
             if is_json {
                 eprintln!("{} Static analysis complete.", "✅".green());
@@ -332,7 +336,10 @@ fn main() {
                 }
 
                 if !all_deprecated_api_issues.is_empty() {
-                    println!("\n{} Found usages of Deprecated Soroban APIs!", "⚠️".yellow());
+                    println!(
+                        "\n{} Found usages of Deprecated Soroban APIs!",
+                        "⚠️".yellow()
+                    );
                     for issue in &all_deprecated_api_issues {
                         println!(
                             "   {} Function {}: Uses deprecated `{}` ({})",
@@ -469,7 +476,7 @@ fn main() {
 }
 
 fn is_soroban_project(path: &Path) -> bool {
-    if path.is_file() && path.extension().map_or(false, |e| e == "rs") {
+    if path.is_file() && path.extension().is_some_and(|e| e == "rs") {
         return true;
     }
 
@@ -493,6 +500,7 @@ fn is_soroban_project(path: &Path) -> bool {
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analyze_directory(
     dir: &Path,
     analyzer: &Analyzer,
@@ -506,16 +514,20 @@ fn analyze_directory(
     all_deprecated_api_issues: &mut Vec<DeprecatedApiIssue>,
     all_custom_rule_matches: &mut Vec<CustomRuleMatch>,
     all_gas_estimations: &mut Vec<GasEstimationReport>,
-    all_symbolic_paths: &mut Vec<sanctifier_core::symbolic::SymbolicGraph>,
-    upgrade_report: &mut UpgradeReport,
+    _all_symbolic_paths: &mut Vec<sanctifier_core::symbolic::SymbolicGraph>,
+    _upgrade_report: &mut UpgradeReport,
 ) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            
+
             // Skip paths matches in config.exclude
-            if config.exclude.iter().any(|p| name.contains(p) || path.to_string_lossy().contains(p)) {
+            if config
+                .exclude
+                .iter()
+                .any(|p| name.contains(p) || path.to_string_lossy().contains(p))
+            {
                 continue;
             }
 
@@ -525,7 +537,7 @@ fn analyze_directory(
                 }
                 analyze_directory(
                     &path,
-                    &analyzer,
+                    analyzer,
                     config,
                     cache,
                     all_size_warnings,
@@ -536,8 +548,8 @@ fn analyze_directory(
                     all_deprecated_api_issues,
                     all_custom_rule_matches,
                     all_gas_estimations,
-                    all_symbolic_paths,
-                    upgrade_report,
+                    _all_symbolic_paths,
+                    _upgrade_report,
                 );
             } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
                 if let Ok(content) = fs::read_to_string(&path) {
@@ -580,7 +592,12 @@ fn analyze_directory(
     }
 }
 
-fn run_analysis(path: &Path, content: &str, analyzer: &Analyzer, config: &SanctifyConfig) -> CachedAnalysis {
+fn run_analysis(
+    path: &Path,
+    content: &str,
+    analyzer: &Analyzer,
+    config: &SanctifyConfig,
+) -> CachedAnalysis {
     let mut analysis = CachedAnalysis::default();
 
     let warnings = analyzer.analyze_ledger_size(content);
@@ -597,7 +614,9 @@ fn run_analysis(path: &Path, content: &str, analyzer: &Analyzer, config: &Sancti
 
     let gaps = analyzer.scan_auth_gaps(content);
     for g in gaps {
-        analysis.auth_gaps.push(format!("{}: {}", path.display(), g));
+        analysis
+            .auth_gaps
+            .push(format!("{}: {}", path.display(), g));
     }
 
     let panics = analyzer.scan_panics(content);
@@ -630,6 +649,7 @@ fn run_analysis(path: &Path, content: &str, analyzer: &Analyzer, config: &Sancti
 
     analysis
 }
+
 
 
 fn load_config(path: &Path) -> SanctifyConfig {

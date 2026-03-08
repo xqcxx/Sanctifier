@@ -8,7 +8,7 @@ type WasmModule = {
 
 export async function analyzeSourceInBrowser(source: string): Promise<AnalysisReport> {
   const mod = (await import(
-    // @ts-ignore
+    // @ts-expect-error: WASM module is loaded dynamically at runtime
     /* webpackIgnore: true */ "/wasm/sanctifier_wasm.js"
   )) as unknown as WasmModule;
   if (typeof mod?.default === "function") {
@@ -23,7 +23,7 @@ export async function analyzeSourceWithConfigInBrowser(
   source: string
 ): Promise<AnalysisReport> {
   const mod = (await import(
-    // @ts-ignore
+    // @ts-expect-error: WASM module is loaded dynamically at runtime
     /* webpackIgnore: true */ "/wasm/sanctifier_wasm.js"
   )) as unknown as WasmModule;
   if (typeof mod?.default === "function") {
