@@ -1,29 +1,35 @@
 use clap::{Parser, Subcommand};
 use colored::*;
-use serde::{Deserialize, Serialize};
 use sanctifier_core::gas_estimator::GasEstimationReport;
+use sanctifier_core::zk_proof::ZkProofSummary;
 use sanctifier_core::{
     Analyzer, ArithmeticIssue, CustomRuleMatch, SanctifyConfig, SizeWarning, UnsafePattern,
     UpgradeReport,
 };
-use sanctifier_core::zk_proof::ZkProofSummary;
+use serde::{Deserialize, Serialize};
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-
+/// Metrics for Kani formal verification results
 #[derive(Serialize)]
 pub struct KaniVerificationMetrics {
+    /// Total number of safety assertions checked
     pub total_assertions: usize,
+    /// Number of assertions successfully proven
     pub proven: usize,
+    /// Number of assertions that failed verification
     pub failed: usize,
+    /// Number of assertions that are unreachable in the code
     pub unreachable: usize,
 }
 
+/// Main CLI structure for the Sanctifier tool
 #[derive(Parser)]
 #[command(name = "sanctifier")]
 #[command(about = "Stellar Soroban Security & Formal Verification Suite", long_about = None)]
 struct Cli {
+    /// The subcommand to execute
     #[command(subcommand)]
     command: Commands,
 }
@@ -32,14 +38,18 @@ struct Cli {
 pub enum Commands {
     /// Analyze a Soroban contract for vulnerabilities
     Analyze {
+        /// Path to the Soroban contract or project directory
         path: PathBuf,
+        /// Output format (text, json)
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Maximum ledger entry size limit in bytes
         #[arg(short, long, default_value_t = 64000)]
         limit: usize,
     },
     /// Generate a summary report
     Report {
+        /// Optional path to save the generated report
         #[arg(short, long, value_name = "OUTPUT")]
         output: Option<PathBuf>,
     },
@@ -47,7 +57,9 @@ pub enum Commands {
     Init,
     /// Translate Soroban contract into a Kani-verifiable harness
     Kani {
+        /// Path to the .rs file to translate
         path: PathBuf,
+        /// Optional path to save the generated harness
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
@@ -187,7 +199,7 @@ fn main() {
                 // Generate ZK Proof Summary from the current output
                 let report_str = serde_json::to_string(&output).unwrap_or_default();
                 let zk_proof = ZkProofSummary::generate_zk_proof_summary(&report_str);
-                
+
                 // Inject the proof into the final JSON output
                 output["zk_proof_summary"] = serde_json::to_value(&zk_proof).unwrap();
 
@@ -321,7 +333,7 @@ fn main() {
 
                 // Append the ZK Proof generation explicitly in text mode as well
                 println!("\n{} Zero-Knowledge Proof Summary (Emulated)", "🛡️".blue());
-                
+
                 let output_data_for_hash = serde_json::json!({
                     "size": all_size_warnings.len(),
                     "auth": all_auth_gaps.len(),
@@ -330,12 +342,8 @@ fn main() {
                 });
                 let report_str = serde_json::to_string(&output_data_for_hash).unwrap_or_default();
                 let zk_proof = ZkProofSummary::generate_zk_proof_summary(&report_str);
-                
-                println!(
-                    "   {} ID: {}",
-                    "->".blue(),
-                    zk_proof.proof_id.bold()
-                );
+
+                println!("   {} ID: {}", "->".blue(), zk_proof.proof_id.bold());
                 println!(
                     "   {} Public Inputs Hash: {}",
                     "->".blue(),
