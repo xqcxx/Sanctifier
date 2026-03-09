@@ -1305,6 +1305,71 @@ impl<'ast> Visit<'ast> for ArithVisitor {
     }
 }
 
+// ── StorageVisitor ──────────────────────────────────────────────────────────
+
+struct StorageVisitor {
+    issues: Vec<StorageCollisionIssue>,
+    current_fn: Option<String>,
+    instance_keys: HashSet<String>,
+    persistent_keys: HashSet<String>,
+    temporary_keys: HashSet<String>,
+    // Mapping of (key, storage_type) -> location string
+    key_locations: std::collections::HashMap<(String, String), String>,
+}
+
+impl<'ast> Visit<'ast> for StorageVisitor {
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        let prev = self.current_fn.take();
+        self.current_fn = Some(node.sig.ident.to_string());
+        visit::visit_impl_item_fn(self, node);
+        self.current_fn = prev;
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let method_name = node.method.to_string();
+        if method_name == "set" || method_name == "get" || method_name == "has" {
+            let receiver_str = quote::quote!(#node.receiver).to_string();
+            let storage_type = if receiver_str.contains("instance") {
+                Some("Instance")
+            } else if receiver_str.contains("persistent") {
+                Some("Persistent")
+            } else if receiver_str.contains("temporary") {
+                Some("Temporary")
+            } else {
+                None
+            };
+
+            if let Some(st) = storage_type {
+                if let Some(first_arg) = node.args.first() {
+                    let key_str = quote::quote!(#first_arg).to_string();
+                    let loc = self.current_fn.as_ref().map(|f| format!("{}:{}", f, first_arg.span().start().line)).unwrap_or_default();
+                    
+                    match st {
+                        "Instance" => {
+                            self.instance_keys.insert(key_str.clone());
+                            self.key_locations.insert((key_str, st.to_string()), loc);
+                        }
+                        "Persistent" => {
+                            self.persistent_keys.insert(key_str.clone());
+                            self.key_locations.insert((key_str, st.to_string()), loc);
+                        }
+                        "Temporary" => {
+                            self.temporary_keys.insert(key_str.clone());
+                            self.key_locations.insert((key_str, st.to_string()), loc);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
 /// Returns `true` if the expression is a string literal — used to avoid
 /// false-positives on `+` for string concatenation (rare in no_std Soroban
 /// but included for correctness).
@@ -1319,8 +1384,6 @@ fn is_string_literal(expr: &syn::Expr) -> bool {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
-
-    }
 
     #[test]
     fn test_analyze_with_macros() {
@@ -1545,74 +1608,7 @@ fn is_string_literal(expr: &syn::Expr) -> bool {
         assert!(ops.contains(&"+"));
         assert!(ops.contains(&"-"));
         assert!(ops.contains(&"*"));
-    }
-}
-
-// ── StorageVisitor ──────────────────────────────────────────────────────────
-
-struct StorageVisitor {
-    issues: Vec<StorageCollisionIssue>,
-    current_fn: Option<String>,
-    instance_keys: HashSet<String>,
-    persistent_keys: HashSet<String>,
-    temporary_keys: HashSet<String>,
-    // Mapping of (key, storage_type) -> location string
-    key_locations: std::collections::HashMap<(String, String), String>,
-}
-
-impl<'ast> Visit<'ast> for StorageVisitor {
-    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        let prev = self.current_fn.take();
-        self.current_fn = Some(node.sig.ident.to_string());
-        visit::visit_impl_item_fn(self, node);
-        self.current_fn = prev;
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        let method_name = node.method.to_string();
-        if method_name == "set" || method_name == "get" || method_name == "has" {
-            let receiver_str = quote::quote!(#node.receiver).to_string();
-            let storage_type = if receiver_str.contains("instance") {
-                Some("Instance")
-            } else if receiver_str.contains("persistent") {
-                Some("Persistent")
-            } else if receiver_str.contains("temporary") {
-                Some("Temporary")
-            } else {
-                None
-            };
-
-            if let Some(st) = storage_type {
-                if let Some(first_arg) = node.args.first() {
-                    let key_str = quote::quote!(#first_arg).to_string();
-                    let loc = self.current_fn.as_ref().map(|f| format!("{}:{}", f, first_arg.span().start().line)).unwrap_or_default();
-                    
-                    match st {
-                        "Instance" => {
-                            self.instance_keys.insert(key_str.clone());
-                            self.key_locations.insert((key_str, st.to_string()), loc);
-                        }
-                        "Persistent" => {
-                            self.persistent_keys.insert(key_str.clone());
-                            self.key_locations.insert((key_str, st.to_string()), loc);
-                        }
-                        "Temporary" => {
-                            self.temporary_keys.insert(key_str.clone());
-                            self.key_locations.insert((key_str, st.to_string()), loc);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        visit::visit_expr_method_call(self, node);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
+        
         // safe_add uses checked_add — no bare + operator, so not flagged
         assert!(issues.iter().all(|i| i.function_name != "safe_add"));
     }
