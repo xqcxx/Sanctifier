@@ -3,8 +3,8 @@ use colored::*;
 use sanctifier_core::gas_estimator::GasEstimationReport;
 use sanctifier_core::zk_proof::ZkProofSummary;
 use sanctifier_core::{
-    Analyzer, ArithmeticIssue, CustomRuleMatch, DeprecatedApiIssue, FixType,
-    SanctifyConfig, SizeWarning, UnsafePattern, UpgradeReport,
+    Analyzer, ArithmeticIssue, CustomRuleMatch, DeprecatedApiIssue, FixType, SanctifyConfig,
+    SizeWarning, UnsafePattern, UpgradeReport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,7 @@ pub struct CachedAnalysis {
     pub deprecated_api_issues: Vec<DeprecatedApiIssue>,
     pub custom_rule_matches: Vec<CustomRuleMatch>,
     pub gas_estimations: Vec<GasEstimationReport>,
+    pub reentrancy_issues: Vec<sanctifier_core::reentrancy::ReentrancyIssue>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -167,6 +168,8 @@ fn main() {
             let mut all_deprecated_api_issues: Vec<DeprecatedApiIssue> = Vec::new();
             let mut all_custom_rule_matches: Vec<CustomRuleMatch> = Vec::new();
             let mut all_gas_estimations: Vec<GasEstimationReport> = Vec::new();
+            let mut all_reentrancy_issues: Vec<sanctifier_core::reentrancy::ReentrancyIssue> =
+                Vec::new();
             let mut all_symbolic_paths: Vec<sanctifier_core::symbolic::SymbolicGraph> = Vec::new();
             let mut upgrade_report = UpgradeReport::empty();
 
@@ -184,6 +187,7 @@ fn main() {
                     &mut all_deprecated_api_issues,
                     &mut all_custom_rule_matches,
                     &mut all_gas_estimations,
+                    &mut all_reentrancy_issues,
                     &mut all_symbolic_paths,
                     &mut upgrade_report,
                 );
@@ -222,6 +226,7 @@ fn main() {
                     all_deprecated_api_issues.extend(analysis.deprecated_api_issues);
                     all_custom_rule_matches.extend(analysis.custom_rule_matches);
                     all_gas_estimations.extend(analysis.gas_estimations);
+                    all_reentrancy_issues.extend(analysis.reentrancy_issues);
                     let gas_reports = analyzer.scan_gas_estimation(&content);
                     all_gas_estimations.extend(gas_reports);
 
@@ -252,6 +257,7 @@ fn main() {
                     "deprecated_api_issues": all_deprecated_api_issues,
                     "custom_rule_matches": all_custom_rule_matches,
                     "gas_estimations": all_gas_estimations,
+                    "reentrancy_risks": all_reentrancy_issues,
                     "symbolic_paths": all_symbolic_paths,
                     "upgrade_report": upgrade_report,
                     "kani_metrics": KaniVerificationMetrics {
@@ -299,6 +305,22 @@ fn main() {
                             warning.limit
                         );
                     }
+                }
+
+                if !all_reentrancy_issues.is_empty() {
+                    println!("\n{} Found potential Reentrancy Risks!", "🔄".yellow());
+                    for issue in &all_reentrancy_issues {
+                        println!(
+                            "   {} Function {}: {}",
+                            "->".red(),
+                            issue.function_name.bold(),
+                            issue.issue_type.yellow().bold()
+                        );
+                        println!("      Location: {}", issue.location);
+                        println!("      {} {}", "💡".blue(), issue.recommendation);
+                    }
+                } else {
+                    println!("\nNo reentrancy risks found.");
                 }
 
                 if !all_auth_gaps.is_empty() {
@@ -474,8 +496,7 @@ fn main() {
                         }
                     }
                     Err(e) => {
-                        eprintln!("{} Error generating Kani harness: {}", "❌".red(), e)
-                        ;
+                        eprintln!("{} Error generating Kani harness: {}", "❌".red(), e);
                         std::process::exit(1);
                     }
                 }
@@ -485,7 +506,10 @@ fn main() {
             }
         }
         Commands::Fix { path, yes, dry_run } => {
-            println!("{} Sanctifier Fix: Scanning for automatic patches...", "✨".green());
+            println!(
+                "{} Sanctifier Fix: Scanning for automatic patches...",
+                "✨".green()
+            );
             let config = load_config(path);
             let analyzer = Analyzer::new(config.clone());
             let mut total_fixes = 0;
@@ -497,9 +521,17 @@ fn main() {
             }
 
             if *dry_run {
-                println!("\n{} Dry run complete. {} potential fixes identified.", "✅".green(), total_fixes);
+                println!(
+                    "\n{} Dry run complete. {} potential fixes identified.",
+                    "✅".green(),
+                    total_fixes
+                );
             } else {
-                println!("\n{} Fix complete. {} patches applied.", "✅".green(), total_fixes);
+                println!(
+                    "\n{} Fix complete. {} patches applied.",
+                    "✅".green(),
+                    total_fixes
+                );
             }
         }
     }
@@ -544,6 +576,7 @@ fn analyze_directory(
     all_deprecated_api_issues: &mut Vec<DeprecatedApiIssue>,
     all_custom_rule_matches: &mut Vec<CustomRuleMatch>,
     all_gas_estimations: &mut Vec<GasEstimationReport>,
+    all_reentrancy_issues: &mut Vec<sanctifier_core::reentrancy::ReentrancyIssue>,
     _all_symbolic_paths: &mut Vec<sanctifier_core::symbolic::SymbolicGraph>,
     _upgrade_report: &mut UpgradeReport,
 ) {
@@ -578,6 +611,7 @@ fn analyze_directory(
                     all_deprecated_api_issues,
                     all_custom_rule_matches,
                     all_gas_estimations,
+                    all_reentrancy_issues,
                     _all_symbolic_paths,
                     _upgrade_report,
                 );
@@ -616,6 +650,7 @@ fn analyze_directory(
                     all_deprecated_api_issues.extend(analysis.deprecated_api_issues);
                     all_custom_rule_matches.extend(analysis.custom_rule_matches);
                     all_gas_estimations.extend(analysis.gas_estimations);
+                    all_reentrancy_issues.extend(analysis.reentrancy_issues);
                 }
             }
         }
@@ -677,6 +712,12 @@ fn run_analysis(
     let gas_reports = analyzer.scan_gas_estimation(content);
     analysis.gas_estimations.extend(gas_reports);
 
+    let reentrancy = analyzer.scan_reentrancy_risks(content);
+    for mut r in reentrancy {
+        r.location = format!("{}: {}", path.display(), r.location);
+        analysis.reentrancy_issues.push(r);
+    }
+
     analysis
 }
 
@@ -693,7 +734,11 @@ fn fix_directory(
             let path = entry.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-            if config.exclude.iter().any(|p| name.contains(p) || path.to_string_lossy().contains(p)) {
+            if config
+                .exclude
+                .iter()
+                .any(|p| name.contains(p) || path.to_string_lossy().contains(p))
+            {
                 continue;
             }
 
@@ -709,13 +754,7 @@ fn fix_directory(
     }
 }
 
-fn fix_file(
-    path: &Path,
-    analyzer: &Analyzer,
-    yes: bool,
-    dry_run: bool,
-    total_fixes: &mut usize,
-) {
+fn fix_file(path: &Path, analyzer: &Analyzer, yes: bool, dry_run: bool, total_fixes: &mut usize) {
     if let Ok(content) = fs::read_to_string(path) {
         let mut fixes = analyzer.suggest_fixes(&content);
         if fixes.is_empty() {
@@ -723,17 +762,25 @@ fn fix_file(
         }
 
         // Sort fixes by line and column in reverse order to apply them without breaking offsets
-        fixes.sort_by(|a, b| {
-            b.line.cmp(&a.line).then(b.column.cmp(&a.column))
-        });
+        fixes.sort_by(|a, b| b.line.cmp(&a.line).then(b.column.cmp(&a.column)));
 
-        println!("\n{} Found {} potential fixes for {:?}", "💡".blue(), fixes.len(), path);
+        println!(
+            "\n{} Found {} potential fixes for {:?}",
+            "💡".blue(),
+            fixes.len(),
+            path
+        );
 
         let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
         let mut applied_in_file = 0;
 
         for fix in fixes {
-            println!("   {} [{:?}] {}", "->".yellow(), fix.fix_type, fix.description);
+            println!(
+                "   {} [{:?}] {}",
+                "->".yellow(),
+                fix.fix_type,
+                fix.description
+            );
 
             let should_apply = if yes || dry_run {
                 true
@@ -773,15 +820,18 @@ fn fix_file(
             if let Err(e) = fs::write(path, new_content) {
                 eprintln!("{} Failed to write to {:?}: {}", "❌".red(), path, e);
             } else {
-                println!("   {} Applied {} fixes to {:?}", "✅".green(), applied_in_file, path);
+                println!(
+                    "   {} Applied {} fixes to {:?}",
+                    "✅".green(),
+                    applied_in_file,
+                    path
+                );
             }
         }
-        
+
         *total_fixes += applied_in_file;
     }
 }
-
-
 
 fn load_config(path: &Path) -> SanctifyConfig {
     if let Some(p) = find_config_path(path) {
