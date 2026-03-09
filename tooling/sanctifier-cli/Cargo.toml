@@ -5,6 +5,9 @@ edition = "2021"
 description = "CLI tool for Sanctifier - Stellar Soroban Security Suite"
 license = "MIT"
 
+[lints]
+workspace = true
+
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0"

@@ -1,6 +1,6 @@
+use quote::ToTokens;
 use serde::{Deserialize, Serialize};
 use syn::spanned::Spanned;
-use quote::ToTokens;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PathNode {
@@ -13,6 +13,12 @@ pub struct PathNode {
 pub struct ExecutionPath {
     pub nodes: Vec<PathNode>,
     pub is_panic: bool,
+}
+
+impl Default for ExecutionPath {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ExecutionPath {
@@ -37,7 +43,7 @@ impl SymbolicAnalyzer {
         let fn_name = fn_item.sig.ident.to_string();
         let initial_paths = vec![ExecutionPath::new()];
         let final_paths = Self::traverse_stmts(&fn_item.block.stmts, initial_paths);
-        
+
         SymbolicGraph {
             function_name: fn_name,
             paths: final_paths,
@@ -46,7 +52,7 @@ impl SymbolicAnalyzer {
 
     fn traverse_stmts(stmts: &[syn::Stmt], base_paths: Vec<ExecutionPath>) -> Vec<ExecutionPath> {
         let mut current_paths = base_paths;
-        
+
         for stmt in stmts {
             let mut next_paths = Vec::new();
             for path in current_paths {
@@ -54,13 +60,13 @@ impl SymbolicAnalyzer {
                     next_paths.push(path);
                     continue; // Skip further statements in a panicked path
                 }
-                
+
                 let branched = Self::explore_stmt(stmt, path);
                 next_paths.extend(branched);
             }
             current_paths = next_paths;
         }
-        
+
         current_paths
     }
 
@@ -101,7 +107,7 @@ impl SymbolicAnalyzer {
             syn::Expr::Block(b) => Self::traverse_stmts(&b.block.stmts, vec![path]),
             syn::Expr::If(if_expr) => {
                 let mut paths = Vec::new();
-                
+
                 // True branch
                 let mut true_path = path.clone();
                 true_path.nodes.push(PathNode {
@@ -109,8 +115,11 @@ impl SymbolicAnalyzer {
                     description: format!("If ({})", if_expr.cond.to_token_stream()),
                     line: if_expr.cond.span().start().line,
                 });
-                paths.extend(Self::traverse_stmts(&if_expr.then_branch.stmts, vec![true_path]));
-                
+                paths.extend(Self::traverse_stmts(
+                    &if_expr.then_branch.stmts,
+                    vec![true_path],
+                ));
+
                 // False branch
                 let mut false_path = path;
                 false_path.nodes.push(PathNode {
@@ -118,14 +127,14 @@ impl SymbolicAnalyzer {
                     description: format!("Else (!{})", if_expr.cond.to_token_stream()),
                     line: if_expr.cond.span().start().line,
                 });
-                
+
                 if let Some((_, else_branch)) = &if_expr.else_branch {
                     paths.extend(Self::explore_expr(else_branch, false_path));
                 } else {
                     // Implicit empty else block
                     paths.push(false_path);
                 }
-                
+
                 paths
             }
             syn::Expr::Match(match_expr) => {
@@ -185,7 +194,7 @@ impl SymbolicAnalyzer {
                 }
                 vec![path]
             }
-            
+
             // Standard assignment / unary / binary math operations, we just record them.
             syn::Expr::Assign(assign_expr) => {
                 path.nodes.push(PathNode {
@@ -195,7 +204,7 @@ impl SymbolicAnalyzer {
                 });
                 vec![path]
             }
-            
+
             _ => {
                 // Return unchanged for expressions that do not branch
                 vec![path]
@@ -220,10 +229,10 @@ mod tests {
         "#;
         let fn_item: syn::ImplItemFn = parse_str(code).unwrap();
         let graph = SymbolicAnalyzer::analyze_function(&fn_item);
-        
+
         assert_eq!(graph.function_name, "simple_fn");
         assert_eq!(graph.paths.len(), 1);
-        assert_eq!(graph.paths[0].is_panic, false);
+        assert!(!graph.paths[0].is_panic);
     }
 
     #[test]
@@ -239,7 +248,7 @@ mod tests {
         "#;
         let fn_item: syn::ImplItemFn = parse_str(code).unwrap();
         let graph = SymbolicAnalyzer::analyze_function(&fn_item);
-        
+
         assert_eq!(graph.paths.len(), 2);
     }
 
@@ -252,8 +261,8 @@ mod tests {
         "#;
         let fn_item: syn::ImplItemFn = parse_str(code).unwrap();
         let graph = SymbolicAnalyzer::analyze_function(&fn_item);
-        
+
         assert_eq!(graph.paths.len(), 1);
-        assert_eq!(graph.paths[0].is_panic, true);
+        assert!(graph.paths[0].is_panic);
     }
 }

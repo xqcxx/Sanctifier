@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Run-time invariant guarding and formal verification bridge for Sanctifier"
 
+[lints]
+workspace = true
+
 [dependencies]
 soroban-sdk = { version = "20.0.0", optional = true }
 

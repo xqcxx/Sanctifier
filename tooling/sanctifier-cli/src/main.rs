@@ -1,17 +1,17 @@
 use clap::{Parser, Subcommand};
 use colored::*;
-use serde::{Deserialize, Serialize};
 use sanctifier_core::gas_estimator::GasEstimationReport;
-use sanctifier_core::{
-    Analyzer, ArithmeticIssue, CustomRuleMatch, DeprecatedApiIssue, SanctifyConfig, SizeWarning, UnsafePattern,
-    UpgradeReport,
-};
 use sanctifier_core::zk_proof::ZkProofSummary;
+use sanctifier_core::{
+    Analyzer, ArithmeticIssue, CustomRuleMatch, DeprecatedApiIssue, FixType,
+    SanctifyConfig, SizeWarning, UnsafePattern, UpgradeReport,
+};
+use serde::{Deserialize, Serialize};
 
-use std::fs;
-use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct CachedAnalysis {
@@ -55,19 +55,25 @@ fn compute_hash(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-
+/// Metrics for Kani formal verification results
 #[derive(Serialize)]
 pub struct KaniVerificationMetrics {
+    /// Total number of safety assertions checked
     pub total_assertions: usize,
+    /// Number of assertions successfully proven
     pub proven: usize,
+    /// Number of assertions that failed verification
     pub failed: usize,
+    /// Number of assertions that are unreachable in the code
     pub unreachable: usize,
 }
 
+/// Main CLI structure for the Sanctifier tool
 #[derive(Parser)]
 #[command(name = "sanctifier")]
 #[command(about = "Stellar Soroban Security & Formal Verification Suite", long_about = None)]
 struct Cli {
+    /// The subcommand to execute
     #[command(subcommand)]
     command: Commands,
 }
@@ -76,14 +82,18 @@ struct Cli {
 pub enum Commands {
     /// Analyze a Soroban contract for vulnerabilities
     Analyze {
+        /// Path to the Soroban contract or project directory
         path: PathBuf,
+        /// Output format (text, json)
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Maximum ledger entry size limit in bytes
         #[arg(short, long, default_value_t = 64000)]
         limit: usize,
     },
     /// Generate a summary report
     Report {
+        /// Optional path to save the generated report
         #[arg(short, long, value_name = "OUTPUT")]
         output: Option<PathBuf>,
     },
@@ -91,9 +101,22 @@ pub enum Commands {
     Init,
     /// Translate Soroban contract into a Kani-verifiable harness
     Kani {
+        /// Path to the .rs file to translate
         path: PathBuf,
+        /// Optional path to save the generated harness
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+    /// Automatically fix basic vulnerabilities and code issues
+    Fix {
+        /// Path to the Soroban contract or project directory
+        path: PathBuf,
+        /// Apply fixes without confirmation
+        #[arg(short, long)]
+        yes: bool,
+        /// Show what would be changed without modifying files
+        #[arg(short, long)]
+        dry_run: bool,
     },
 }
 
@@ -207,7 +230,11 @@ fn main() {
                 }
             }
 
-            cache.save(if path.is_dir() { path } else { path.parent().unwrap_or(Path::new(".")) });
+            cache.save(if path.is_dir() {
+                path
+            } else {
+                path.parent().unwrap_or(Path::new("."))
+            });
 
             if is_json {
                 eprintln!("{} Static analysis complete.", "✅".green());
@@ -238,7 +265,7 @@ fn main() {
                 // Generate ZK Proof Summary from the current output
                 let report_str = serde_json::to_string(&output).unwrap_or_default();
                 let zk_proof = ZkProofSummary::generate_zk_proof_summary(&report_str);
-                
+
                 // Inject the proof into the final JSON output
                 output["zk_proof_summary"] = serde_json::to_value(&zk_proof).unwrap();
 
@@ -320,7 +347,10 @@ fn main() {
                 }
 
                 if !all_deprecated_api_issues.is_empty() {
-                    println!("\n{} Found usages of Deprecated Soroban APIs!", "⚠️".yellow());
+                    println!(
+                        "\n{} Found usages of Deprecated Soroban APIs!",
+                        "⚠️".yellow()
+                    );
                     for issue in &all_deprecated_api_issues {
                         println!(
                             "   {} Function {}: Uses deprecated `{}` ({})",
@@ -385,7 +415,7 @@ fn main() {
 
                 // Append the ZK Proof generation explicitly in text mode as well
                 println!("\n{} Zero-Knowledge Proof Summary (Emulated)", "🛡️".blue());
-                
+
                 let output_data_for_hash = serde_json::json!({
                     "size": all_size_warnings.len(),
                     "auth": all_auth_gaps.len(),
@@ -395,12 +425,8 @@ fn main() {
                 });
                 let report_str = serde_json::to_string(&output_data_for_hash).unwrap_or_default();
                 let zk_proof = ZkProofSummary::generate_zk_proof_summary(&report_str);
-                
-                println!(
-                    "   {} ID: {}",
-                    "->".blue(),
-                    zk_proof.proof_id.bold()
-                );
+
+                println!("   {} ID: {}", "->".blue(), zk_proof.proof_id.bold());
                 println!(
                     "   {} Public Inputs Hash: {}",
                     "->".blue(),
@@ -448,7 +474,8 @@ fn main() {
                         }
                     }
                     Err(e) => {
-                        eprintln!("{} Error generating Kani harness: {}", "❌".red(), e);
+                        eprintln!("{} Error generating Kani harness: {}", "❌".red(), e)
+                        ;
                         std::process::exit(1);
                     }
                 }
@@ -457,11 +484,29 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Fix { path, yes, dry_run } => {
+            println!("{} Sanctifier Fix: Scanning for automatic patches...", "✨".green());
+            let config = load_config(path);
+            let analyzer = Analyzer::new(config.clone());
+            let mut total_fixes = 0;
+
+            if path.is_dir() {
+                fix_directory(path, &analyzer, &config, *yes, *dry_run, &mut total_fixes);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                fix_file(path, &analyzer, *yes, *dry_run, &mut total_fixes);
+            }
+
+            if *dry_run {
+                println!("\n{} Dry run complete. {} potential fixes identified.", "✅".green(), total_fixes);
+            } else {
+                println!("\n{} Fix complete. {} patches applied.", "✅".green(), total_fixes);
+            }
+        }
     }
 }
 
 fn is_soroban_project(path: &Path) -> bool {
-    if path.is_file() && path.extension().map_or(false, |e| e == "rs") {
+    if path.is_file() && path.extension().is_some_and(|e| e == "rs") {
         return true;
     }
 
@@ -475,7 +520,7 @@ fn is_soroban_project(path: &Path) -> bool {
         let cargo = p.join("Cargo.toml");
         if cargo.exists() {
             if let Ok(content) = std::fs::read_to_string(&cargo) {
-                if content.contains("soroban-sdk") {
+                if content.contains("soroban-sdk") || content.contains("[workspace]") {
                     return true;
                 }
             }
@@ -485,6 +530,7 @@ fn is_soroban_project(path: &Path) -> bool {
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analyze_directory(
     dir: &Path,
     analyzer: &Analyzer,
@@ -498,16 +544,20 @@ fn analyze_directory(
     all_deprecated_api_issues: &mut Vec<DeprecatedApiIssue>,
     all_custom_rule_matches: &mut Vec<CustomRuleMatch>,
     all_gas_estimations: &mut Vec<GasEstimationReport>,
-    all_symbolic_paths: &mut Vec<sanctifier_core::symbolic::SymbolicGraph>,
-    upgrade_report: &mut UpgradeReport,
+    _all_symbolic_paths: &mut Vec<sanctifier_core::symbolic::SymbolicGraph>,
+    _upgrade_report: &mut UpgradeReport,
 ) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            
+
             // Skip paths matches in config.exclude
-            if config.exclude.iter().any(|p| name.contains(p) || path.to_string_lossy().contains(p)) {
+            if config
+                .exclude
+                .iter()
+                .any(|p| name.contains(p) || path.to_string_lossy().contains(p))
+            {
                 continue;
             }
 
@@ -517,7 +567,7 @@ fn analyze_directory(
                 }
                 analyze_directory(
                     &path,
-                    &analyzer,
+                    analyzer,
                     config,
                     cache,
                     all_size_warnings,
@@ -528,8 +578,8 @@ fn analyze_directory(
                     all_deprecated_api_issues,
                     all_custom_rule_matches,
                     all_gas_estimations,
-                    all_symbolic_paths,
-                    upgrade_report,
+                    _all_symbolic_paths,
+                    _upgrade_report,
                 );
             } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
                 if let Ok(content) = fs::read_to_string(&path) {
@@ -572,7 +622,12 @@ fn analyze_directory(
     }
 }
 
-fn run_analysis(path: &Path, content: &str, analyzer: &Analyzer, config: &SanctifyConfig) -> CachedAnalysis {
+fn run_analysis(
+    path: &Path,
+    content: &str,
+    analyzer: &Analyzer,
+    config: &SanctifyConfig,
+) -> CachedAnalysis {
     let mut analysis = CachedAnalysis::default();
 
     let warnings = analyzer.analyze_ledger_size(content);
@@ -589,7 +644,9 @@ fn run_analysis(path: &Path, content: &str, analyzer: &Analyzer, config: &Sancti
 
     let gaps = analyzer.scan_auth_gaps(content);
     for g in gaps {
-        analysis.auth_gaps.push(format!("{}: {}", path.display(), g));
+        analysis
+            .auth_gaps
+            .push(format!("{}: {}", path.display(), g));
     }
 
     let panics = analyzer.scan_panics(content);
@@ -615,14 +672,6 @@ fn run_analysis(path: &Path, content: &str, analyzer: &Analyzer, config: &Sancti
     for mut m in custom_matches {
         m.snippet = format!("{}: {}", path.display(), m.snippet);
         analysis.custom_rule_matches.push(m);
-                    let gas_reports = analyzer.scan_gas_estimation(&content);
-                    all_gas_estimations.extend(gas_reports);
-
-                    let sym_paths = analyzer.analyze_symbolic_paths(&content);
-                    all_symbolic_paths.extend(sym_paths);
-                }
-            }
-        }
     }
 
     let gas_reports = analyzer.scan_gas_estimation(content);
@@ -631,29 +680,108 @@ fn run_analysis(path: &Path, content: &str, analyzer: &Analyzer, config: &Sancti
     analysis
 }
 
-fn collect_rs_files(path: &std::path::PathBuf) -> Vec<std::path::PathBuf> {
-    let mut files = Vec::new();
-    if path.is_file() && path.extension().map_or(false, |e| e == "rs") {
-        files.push(path.clone());
-    } else if path.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                let name = p
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                if p.is_dir() && name != "target" && name != ".git" {
-                    files.extend(collect_rs_files(&p));
-                } else if p.extension().map_or(false, |e| e == "rs") {
-                    files.push(p);
+fn fix_directory(
+    dir: &Path,
+    analyzer: &Analyzer,
+    config: &SanctifyConfig,
+    yes: bool,
+    dry_run: bool,
+    total_fixes: &mut usize,
+) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+            if config.exclude.iter().any(|p| name.contains(p) || path.to_string_lossy().contains(p)) {
+                continue;
+            }
+
+            if path.is_dir() {
+                if config.ignore_paths.iter().any(|p| name.contains(p)) {
+                    continue;
                 }
+                fix_directory(&path, analyzer, config, yes, dry_run, total_fixes);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+                fix_file(&path, analyzer, yes, dry_run, total_fixes);
             }
         }
     }
-    files
 }
+
+fn fix_file(
+    path: &Path,
+    analyzer: &Analyzer,
+    yes: bool,
+    dry_run: bool,
+    total_fixes: &mut usize,
+) {
+    if let Ok(content) = fs::read_to_string(path) {
+        let mut fixes = analyzer.suggest_fixes(&content);
+        if fixes.is_empty() {
+            return;
+        }
+
+        // Sort fixes by line and column in reverse order to apply them without breaking offsets
+        fixes.sort_by(|a, b| {
+            b.line.cmp(&a.line).then(b.column.cmp(&a.column))
+        });
+
+        println!("\n{} Found {} potential fixes for {:?}", "💡".blue(), fixes.len(), path);
+
+        let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+        let mut applied_in_file = 0;
+
+        for fix in fixes {
+            println!("   {} [{:?}] {}", "->".yellow(), fix.fix_type, fix.description);
+
+            let should_apply = if yes || dry_run {
+                true
+            } else {
+                println!("      Apply this fix? (y/n) ");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).is_ok() && input.trim().to_lowercase() == "y"
+            };
+
+            if should_apply {
+                if !dry_run {
+                    // Simple line-based replacement for now (since our fixes are mostly additive or prefix)
+                    // For PrefixUnused:
+                    if fix.fix_type == FixType::PrefixUnused {
+                        if let Some(line) = lines.get_mut(fix.line - 1) {
+                            let (start, rest) = line.split_at(fix.column);
+                            let (_, end) = rest.split_at(fix.end_column - fix.column);
+                            *line = format!("{}{}{}", start, fix.replacement, end);
+                            applied_in_file += 1;
+                        }
+                    } else if fix.fix_type == FixType::AddAuth {
+                        // For AddAuth:
+                        if let Some(line) = lines.get_mut(fix.line - 1) {
+                            let (start, rest) = line.split_at(fix.column);
+                            *line = format!("{}{}{}", start, fix.replacement, rest);
+                            applied_in_file += 1;
+                        }
+                    }
+                } else {
+                    applied_in_file += 1;
+                }
+            }
+        }
+
+        if !dry_run && applied_in_file > 0 {
+            let new_content = lines.join("\n");
+            if let Err(e) = fs::write(path, new_content) {
+                eprintln!("{} Failed to write to {:?}: {}", "❌".red(), path, e);
+            } else {
+                println!("   {} Applied {} fixes to {:?}", "✅".green(), applied_in_file, path);
+            }
+        }
+        
+        *total_fixes += applied_in_file;
+    }
+}
+
+
 
 fn load_config(path: &Path) -> SanctifyConfig {
     if let Some(p) = find_config_path(path) {
