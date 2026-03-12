@@ -161,7 +161,10 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
         + custom_matches.len()
         + event_issues.len()
         + unhandled_results.len()
-        + upgrade_reports.iter().map(|r| r.findings.len()).sum::<usize>()
+        + upgrade_reports
+            .iter()
+            .map(|r| r.findings.len())
+            .sum::<usize>()
         + smt_issues.len();
 
     let has_critical =
@@ -390,7 +393,10 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
     }
 
     if !event_issues.is_empty() {
-        println!("\n{} Found Event Consistency/Optimization issues!", "⚠️".yellow());
+        println!(
+            "\n{} Found Event Consistency/Optimization issues!",
+            "⚠️".yellow()
+        );
         for issue in &event_issues {
             println!(
                 "   {} [{}] Event: {}",

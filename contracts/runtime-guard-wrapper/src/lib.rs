@@ -2,20 +2,17 @@
 #![allow(unexpected_cfgs)]
 
 //! Runtime Guard Wrapper Contract
-//! 
+//!
 //! This contract wraps a target Soroban contract and provides runtime validation,
 //! monitoring, and security guards for continuous testnet validation.
-//! 
+//!
 //! The wrapper maintains:
 //! - Execution logs for all contract calls
 //! - State invariant checks before and after execution
 //! - Event emission for security-critical operations
 //! - Gas and performance metrics collection
 
-use soroban_sdk::{
-    contract, contractimpl, Address, Env, Error, IntoVal, Symbol,
-    Val, Vec,
-};
+use soroban_sdk::{contract, contractimpl, Address, Env, Error, IntoVal, Symbol, Val, Vec};
 
 const WRAPPED_CONTRACT_ADDRESS: &str = "wrapped_contract_addr";
 const CALL_LOG: &str = "call_log";
@@ -66,23 +63,22 @@ pub struct RuntimeGuardWrapper;
 impl RuntimeGuardWrapper {
     /// Initialize the wrapper with a target contract address
     pub fn init(env: Env, wrapped_contract: Address) {
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, WRAPPED_CONTRACT_ADDRESS), &wrapped_contract);
+        env.storage().instance().set(
+            &Symbol::new(&env, WRAPPED_CONTRACT_ADDRESS),
+            &wrapped_contract,
+        );
 
         // Initialize guard configuration
         let config = GuardConfig::default();
-        env.storage()
-            .instance()
-            .set(
-                &Symbol::new(&env, "guard_config"),
-                &(
-                    config.check_storage_invariants,
-                    config.check_auth_guards,
-                    config.check_overflow,
-                    config.monitor_events,
-                ),
-            );
+        env.storage().instance().set(
+            &Symbol::new(&env, "guard_config"),
+            &(
+                config.check_storage_invariants,
+                config.check_auth_guards,
+                config.check_overflow,
+                config.monitor_events,
+            ),
+        );
 
         // Initialize logging
         env.storage()
@@ -93,13 +89,15 @@ impl RuntimeGuardWrapper {
             .persistent()
             .set(&Symbol::new(&env, INVARIANTS_CHECKED), &0u32);
 
-        env.storage()
-            .persistent()
-            .set(&Symbol::new(&env, GUARD_FAILURES), &Vec::<Symbol>::new(&env));
+        env.storage().persistent().set(
+            &Symbol::new(&env, GUARD_FAILURES),
+            &Vec::<Symbol>::new(&env),
+        );
 
-        env.storage()
-            .persistent()
-            .set(&Symbol::new(&env, EXECUTION_METRICS), &Vec::<(u32, bool, u64, u64)>::new(&env));
+        env.storage().persistent().set(
+            &Symbol::new(&env, EXECUTION_METRICS),
+            &Vec::<(u32, bool, u64, u64)>::new(&env),
+        );
 
         Self::emit_guard_event(env, "wrapper_initialized", "success");
     }
@@ -132,9 +130,10 @@ impl RuntimeGuardWrapper {
     /// Pre-execution validation guards
     fn pre_execution_guards(env: Env) -> Result<(), Error> {
         // Check invariant: wrapped contract should be set
-        let wrapped = env.storage().instance().get::<Symbol, Address>(
-            &Symbol::new(&env, WRAPPED_CONTRACT_ADDRESS),
-        );
+        let wrapped = env
+            .storage()
+            .instance()
+            .get::<Symbol, Address>(&Symbol::new(&env, WRAPPED_CONTRACT_ADDRESS));
         if wrapped.is_none() {
             Self::emit_guard_event(env, "pre_exec_guard", "wrapped_contract_not_set");
             return Err(Error::from_contract_error(1));
@@ -182,10 +181,7 @@ impl RuntimeGuardWrapper {
             .get(&Symbol::new(&env, INVARIANTS_CHECKED))
             .unwrap_or(0);
 
-        persistent.set(
-            &Symbol::new(&env, INVARIANTS_CHECKED),
-            &(checked_count + 1),
-        );
+        persistent.set(&Symbol::new(&env, INVARIANTS_CHECKED), &(checked_count + 1));
 
         Ok(())
     }
@@ -208,8 +204,7 @@ impl RuntimeGuardWrapper {
 
         // Generate execution hash (simplified for testnet)
         let val: Val = function_name.clone().into_val(&env);
-        let call_hash = (val.get_payload().wrapping_mul(31)
-            ^ start_tick.wrapping_mul(17)) as u32;
+        let call_hash = (val.get_payload().wrapping_mul(31) ^ start_tick.wrapping_mul(17)) as u32;
 
         // Store execution metrics
         let metrics = ExecutionMetrics {
@@ -284,10 +279,7 @@ impl RuntimeGuardWrapper {
     fn emit_guard_event(env: Env, event_name: &str, status: &str) {
         env.events().publish(
             (Symbol::new(&env, "guard_wrapper"),),
-            (
-                Symbol::new(&env, event_name),
-                Symbol::new(&env, status),
-            ),
+            (Symbol::new(&env, event_name), Symbol::new(&env, status)),
         );
     }
 
@@ -307,11 +299,7 @@ impl RuntimeGuardWrapper {
             .get(&Symbol::new(&env, GUARD_FAILURES))
             .unwrap_or_else(|| Vec::new(&env));
 
-        (
-            invariants_checked,
-            call_log.len(),
-            guard_failures.len(),
-        )
+        (invariants_checked, call_log.len(), guard_failures.len())
     }
 
     /// Health check for continuous validation
