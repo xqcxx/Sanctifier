@@ -9,12 +9,7 @@ use sanctifier_core::{Analyzer, SanctifyConfig, SizeWarningLevel};
 use serde_json;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-use tracing::{debug, error, info, warn};
 
-use crate::vulndb::{VulnDatabase, VulnMatch};
 
 #[derive(Args, Debug)]
 pub struct AnalyzeArgs {
@@ -205,19 +200,7 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
     let mut auth_gaps = Vec::new();
     let mut panic_issues = Vec::new();
     let mut arithmetic_issues = Vec::new();
-    let mut custom_matches = Vec::new();
-    let mut vuln_matches: Vec<VulnMatch> = Vec::new();
-    let mut event_issues = Vec::new();
-    let mut unhandled_results = Vec::new();
-    let mut upgrade_reports = Vec::new();
-    let mut smt_issues = Vec::new();
-    let mut sep41_checked_contracts = Vec::new();
-    let mut sep41_issues = Vec::new();
-    let mut timed_out_files: Vec<String> = Vec::new();
 
-    for r in results {
-        if r.timed_out {
-            timed_out_files.push(r.file_path.clone());
         }
         collisions.extend(r.collisions);
         size_warnings.extend(r.size_warnings);
@@ -279,9 +262,12 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
         warn!(target: "sanctifier", error = %err, "Failed to initialize webhook client");
     }
 
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let rules_executed: usize = 6;
+
     if is_json {
         let report = serde_json::json!({
-            "schema_version": "1.0.0",
+
             "storage_collisions": collisions,
             "ledger_size_warnings": size_warnings,
             "unsafe_patterns": unsafe_patterns,
@@ -642,6 +628,11 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
     }
 
     println!("\n{} Static analysis complete.", "✨".green());
+    println!(
+        "⏱  Analysis completed in {:.1}s ({} files)",
+        duration_ms as f64 / 1000.0,
+        files_analyzed
+    );
 
     Ok(())
 }
@@ -650,64 +641,6 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
 
 pub(crate) fn analyze_single_file(
     analyzer: &Analyzer,
-    vuln_db: &VulnDatabase,
-    content: &str,
-    file_name: &str,
-) -> FileAnalysisResult {
-    let mut res = FileAnalysisResult {
-        file_path: file_name.to_string(),
-        ..Default::default()
-    };
-
-    let mut c = analyzer.scan_storage_collisions(content);
-    for i in &mut c {
-        i.location = format!("{}:{}", file_name, i.location);
-    }
-    res.collisions = c;
-
-    res.size_warnings = analyzer.analyze_ledger_size(content);
-
-    let mut u = analyzer.analyze_unsafe_patterns(content);
-    for i in &mut u {
-        i.snippet = format!("{}:{}", file_name, i.snippet);
-    }
-    res.unsafe_patterns = u;
-
-    for g in analyzer.scan_auth_gaps(content) {
-        res.auth_gaps.push(format!("{}:{}", file_name, g));
-    }
-
-    let mut p = analyzer.scan_panics(content);
-    for i in &mut p {
-        i.location = format!("{}:{}", file_name, i.location);
-    }
-    res.panic_issues = p;
-
-    let mut a = analyzer.scan_arithmetic_overflow(content);
-    for i in &mut a {
-        i.location = format!("{}:{}", file_name, i.location);
-    }
-    res.arithmetic_issues = a;
-
-    let mut custom = analyzer.analyze_custom_rules(content, &analyzer.config.custom_rules);
-    for m in &mut custom {
-        m.snippet = format!("{}:{}: {}", file_name, m.line, m.snippet);
-    }
-    res.custom_matches = custom;
-
-    res.vuln_matches = vuln_db.scan(content, file_name);
-
-    let mut e = analyzer.scan_events(content);
-    for i in &mut e {
-        i.location = format!("{}:{}", file_name, i.location);
-    }
-    res.event_issues = e;
-
-    let mut r = analyzer.scan_unhandled_results(content);
-    for i in &mut r {
-        i.location = format!("{}:{}", file_name, i.location);
-    }
-    res.unhandled_results = r;
 
     let mut up = analyzer.analyze_upgrade_patterns(content);
     for f in &mut up.findings {
