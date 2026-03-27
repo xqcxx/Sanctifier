@@ -26,6 +26,8 @@
 use serde::{Deserialize, Serialize};
 use std::panic::catch_unwind;
 
+/// Contract complexity metrics and reports.
+pub mod complexity;
 /// Canonical finding codes (`S000` – `S012`) emitted by every analysis pass.
 pub mod finding_codes;
 /// Gas / instruction-cost estimation heuristics.
@@ -65,6 +67,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{parse_str, Fields, File, Item, Meta, Type};
 
+pub use complexity::{analyze_complexity, analyze_complexity_from_source, render_text_report};
 pub use rules::{Rule, RuleRegistry, RuleViolation, Severity};
 pub use sep41::{Sep41Issue, Sep41IssueKind, Sep41VerificationReport};
 
