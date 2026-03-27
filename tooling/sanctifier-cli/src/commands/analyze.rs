@@ -1,7 +1,8 @@
 use crate::commands::webhook::{
     send_scan_completed_webhooks, ScanWebhookPayload, ScanWebhookSummary,
 };
-use clap::Args;
+use crate::vulndb::{VulnDatabase, VulnMatch};
+use clap::{Args, ValueEnum};
 use colored::*;
 use rayon::prelude::*;
 use sanctifier_core::finding_codes;
@@ -15,6 +16,41 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::vulndb::{VulnDatabase, VulnMatch};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
+use tracing::{debug, error, info, warn};
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SeverityLevel {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
+impl SeverityLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SeverityLevel::Critical => "critical",
+            SeverityLevel::High => "high",
+            SeverityLevel::Medium => "medium",
+            SeverityLevel::Low => "low",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "critical" => Some(SeverityLevel::Critical),
+            "high" => Some(SeverityLevel::High),
+            "medium" => Some(SeverityLevel::Medium),
+            "low" => Some(SeverityLevel::Low),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Args, Debug)]
 pub struct AnalyzeArgs {
@@ -41,6 +77,14 @@ pub struct AnalyzeArgs {
     /// Webhook endpoint(s) to notify when scan completes (Discord/Slack/Teams/custom)
     #[arg(long = "webhook-url")]
     pub webhook_urls: Vec<String>,
+
+    /// Return non-zero exit code when findings meet or exceed severity threshold
+    #[arg(long)]
+    pub exit_code: bool,
+
+    /// Minimum severity threshold for --exit-code (critical|high|medium|low)
+    #[arg(long, value_enum, default_value_t = SeverityLevel::High)]
+    pub min_severity: SeverityLevel,
 }
 
 // ── Per-file result container ────────────────────────────────────────────────
@@ -70,12 +114,27 @@ pub(crate) struct FileAnalysisResult {
 
 pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
     let path = &args.path;
+    let mut path = args.path.clone();
+
+    // Normalize path separators: ensure backslashes provided by users familiar with Windows
+    // are converted to forward slashes on Unix systems to allow cross-platform path strings.
+    #[cfg(not(windows))]
+    {
+        let s = path.to_string_lossy();
+        if s.contains('\\') {
+            path = PathBuf::from(s.replace('\\', "/"));
+        }
+    }
+
     let format = &args.format;
     let _limit = args.limit;
     let is_json = format == "json";
     let timeout_secs = args.timeout;
 
     if !is_soroban_project(path) {
+    let start = Instant::now();
+
+    if !is_soroban_project(&path) {
         if is_json {
             let err = serde_json::json!({
                 "error": format!("{:?} is not a valid Soroban project", path),
@@ -89,7 +148,7 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
                 "Invalid Soroban project: missing Cargo.toml with a soroban-sdk dependency"
             );
         }
-        std::process::exit(1);
+        std::process::exit(2);
     }
 
     info!(target: "sanctifier", path = %path.display(), "Valid Soroban project found");
@@ -186,6 +245,7 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
 
     // ── Phase 3: sort by file path for deterministic output ──────────────
     results.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+    let files_analyzed = total_files;
 
     // ── Phase 4: merge into flat vectors ─────────────────────────────────
     let mut collisions = Vec::new();
@@ -196,6 +256,7 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
     let mut arithmetic_issues = Vec::new();
     let mut custom_matches = Vec::new();
     let mut vuln_matches: Vec<VulnMatch> = Vec::new();
+    let mut vuln_matches = Vec::new();
     let mut event_issues = Vec::new();
     let mut unhandled_results = Vec::new();
     let mut upgrade_reports = Vec::new();
@@ -208,6 +269,10 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
         if r.timed_out {
             timed_out_files.push(r.file_path.clone());
         }
+    let mut timed_out_files = Vec::new();
+
+    for r in results {
+        call_graph.extend(r.call_graph);
         collisions.extend(r.collisions);
         size_warnings.extend(r.size_warnings);
         unsafe_patterns.extend(r.unsafe_patterns);
@@ -222,6 +287,9 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
         smt_issues.extend(r.smt_issues);
         sep41_checked_contracts.extend(r.sep41_checked_contracts);
         sep41_issues.extend(r.sep41_issues);
+        if r.timed_out {
+            timed_out_files.push(r.file_path);
+        }
     }
 
     let total_findings = collisions.len()
@@ -254,6 +322,60 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
         || upgrade_reports.iter().any(|r| r.findings.iter().any(|f| f.severity() == finding_codes::FindingSeverity::High))
         || event_issues.iter().any(|i| i.severity() == finding_codes::FindingSeverity::High)
         || unhandled_results.iter().any(|i| i.severity() == finding_codes::FindingSeverity::High);
+    let has_critical =
+        !auth_gaps.is_empty() || panic_issues.iter().any(|p| p.issue_type == "panic!");
+    let has_high = !arithmetic_issues.is_empty()
+        || !panic_issues.is_empty()
+        || !smt_issues.is_empty()
+        || !sep41_issues.is_empty()
+        || !unhandled_results.is_empty()
+        || size_warnings
+            .iter()
+            .any(|w| w.level == SizeWarningLevel::ExceedsLimit);
+
+    let highest_finding_severity: Option<SeverityLevel> = {
+        let mut highest: Option<SeverityLevel> = None;
+        let mut consider = |candidate: SeverityLevel| {
+            highest = Some(match highest {
+                Some(current) => current.max(candidate),
+                None => candidate,
+            });
+        };
+
+        if has_critical {
+            consider(SeverityLevel::Critical);
+        }
+
+        if has_high {
+            consider(SeverityLevel::High);
+        }
+
+        if !size_warnings.is_empty() || !unsafe_patterns.is_empty() || !sep41_issues.is_empty() {
+            consider(SeverityLevel::Medium);
+        }
+
+        if !event_issues.is_empty() {
+            consider(SeverityLevel::Low);
+        }
+
+        for vuln in &vuln_matches {
+            if let Some(sev) = SeverityLevel::from_str(&vuln.severity) {
+                consider(sev);
+            }
+        }
+
+        if !timed_out_files.is_empty() {
+            consider(SeverityLevel::Low);
+        }
+
+        highest
+    };
+
+    let should_exit_with_1 = args.exit_code
+        && highest_finding_severity
+            .map(|h| h >= args.min_severity)
+            .unwrap_or(false);
+
     let timestamp = chrono_timestamp();
 
     let webhook_payload = ScanWebhookPayload {
@@ -275,6 +397,32 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
         let report = serde_json::json!({
             "schema_version": "1.0.0",
             "storage_collisions": collisions,
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let _rules_executed: usize = 6;
+
+    if is_json {
+        let call_graph_json: Vec<_> = call_graph
+            .iter()
+            .map(|edge| {
+                let function_expr = edge
+                    .function_expr
+                    .as_ref()
+                    .map(|f| f.trim_start_matches('&').trim().to_string());
+                serde_json::json!({
+                    "caller": edge.caller,
+                    "callee": edge.callee,
+                    "file": edge.file,
+                    "line": edge.line,
+                    "contract_id_expr": edge.contract_id_expr,
+                    "function_expr": function_expr,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let report = serde_json::json!({
+            "schema_version": "1.0.0",
+            "storage_collisions": collisions,
+            "call_graph": call_graph_json,
             "ledger_size_warnings": size_warnings,
             "unsafe_patterns": unsafe_patterns,
             "auth_gaps": auth_gaps,
@@ -416,7 +564,7 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
 
-        if has_critical || has_high {
+        if should_exit_with_1 {
             std::process::exit(1);
         }
         return Ok(());
@@ -645,6 +793,10 @@ pub fn exec(args: AnalyzeArgs) -> anyhow::Result<()> {
     }
 
     println!("\n{} Static analysis complete.", "✨".green());
+
+    if should_exit_with_1 {
+        std::process::exit(1);
+    }
 
     Ok(())
 }
