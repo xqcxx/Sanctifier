@@ -45,6 +45,8 @@ pub enum Commands {
         #[arg(short, long, default_value = "callgraph.dot")]
         output: PathBuf,
     },
+    /// Apply auto-fix patches to a contract; use --interactive to review each patch
+    Fix(commands::fix::FixArgs),
     /// Check for and download the latest Sanctifier binary
     Update,
     /// Detect reentrancy vulnerabilities (state mutation before external call)
@@ -142,6 +144,9 @@ fn run() -> anyhow::Result<()> {
                 output,
                 edges.len()
             );
+        }
+        Commands::Fix(args) => {
+            commands::fix::exec(args)?;
         }
         Commands::Update => {
             commands::update::exec()?;
