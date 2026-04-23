@@ -58,14 +58,57 @@ runs:
       id: summarize
       shell: bash
       run: |
-        findings_count=0
-        if [ "${{ inputs.format }}" = "json" ]; then
-          findings_count=$(sanctifier analyze "${{ inputs.path }}" --format json | jq -r '.summary.total_findings // 0')
-        fi
-        echo "findings-count=${findings_count}" >> "$GITHUB_OUTPUT"
+        python - <<'PY'
+        import json
+        import os
+        import subprocess
+        import sys
+
+        fmt = os.environ.get("INPUT_FORMAT", "sarif")
+        path = os.environ.get("INPUT_PATH", ".")
+        sarif_path = os.environ.get("INPUT_SARIF_OUTPUT", "sanctifier-results.sarif")
+
+        findings_count = 0
+        if fmt == "sarif":
+          try:
+            with open(sarif_path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+            findings_count = sum(len(run.get("results", []) or []) for run in (data.get("runs", []) or []))
+          except FileNotFoundError:
+            findings_count = 0
+        elif fmt == "json":
+          proc = subprocess.run(
+            ["sanctifier", "analyze", path, "--format", "json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+          )
+          try:
+            data = json.loads(proc.stdout or "{}")
+            summary = data.get("summary") or {}
+            findings_count = summary.get("total_findings")
+            if findings_count is None:
+              findings_count = sum(int(summary.get(k, 0) or 0) for k in ("critical", "high", "medium", "low", "info"))
+          except json.JSONDecodeError:
+            findings_count = 0
+
+        out = os.environ.get("GITHUB_OUTPUT")
+        if not out:
+          sys.exit(0)
+        with open(out, "a", encoding="utf-8") as f:
+          f.write(f"findings-count={findings_count}\n")
+        PY
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_SARIF_OUTPUT: ${{ inputs.sarif-output }}
 
     - name: Upload SARIF
-      if: ${{ inputs.format == 'sarif' && inputs.upload-sarif == 'true' }}
+      if: >-
+        ${{ inputs.format == 'sarif'
+          && inputs.upload-sarif == 'true'
+          && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: ${{ inputs.sarif-output }}
